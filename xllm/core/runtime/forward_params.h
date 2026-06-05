@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <numeric>
 #include <optional>
@@ -211,6 +212,10 @@ struct ForwardOutput {
   DiTForwardOutput dit_forward_output;
 
   std::vector<LinearStatePrefixHash> linear_state_evicted_prefix_hashes;
+
+  // Set when the device tensors in this output may still be pending on the
+  // producer stream. Host-copy streams must wait on it before reading them.
+  std::shared_ptr<c10::Event> ready_event;
 };
 
 // Model input with raw data, which will be

@@ -62,6 +62,7 @@ class Stream {
 
   int synchronize() const;
   c10::StreamGuard set_stream_guard() const;
+  void wait_event(const c10::Event& event);
 #if defined(USE_NPU)
   c10_npu::NPUStream* get_stream() { return &stream_; }
 #elif defined(USE_MLU)

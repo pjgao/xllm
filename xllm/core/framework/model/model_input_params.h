@@ -438,6 +438,8 @@ struct ModelInputParams {
         safe_to(graph_buffer.attn_mask, device, true);
     params.graph_buffer.tiling_data =
         safe_to(graph_buffer.tiling_data, device, true);
+    params.graph_buffer.input_tokens_override =
+        safe_to(graph_buffer.input_tokens_override, device, true);
 
     // params for flashinfer
     params.paged_kv_indptr = safe_to(paged_kv_indptr, device);
@@ -692,6 +694,7 @@ struct ModelInputParams {
   struct GraphBuffer {
     torch::Tensor attn_mask;
     torch::Tensor tiling_data;
+    torch::Tensor input_tokens_override;
     bool use_expanded_decode_for_spec_verify_attention = false;
     torch::Tensor expanded_kv_seq_lens;
     torch::Tensor expanded_block_tables;

@@ -19,9 +19,13 @@ limitations under the License.
 #include <acl/acl.h>
 #include <torch/torch.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "core/common/macros.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -76,7 +80,13 @@ class GraphPersistentParam {
                                          const torch::Tensor& positions,
                                          const ModelInputParams& params,
                                          uint32_t padded_num_token,
-                                         bool return_capture_params = false);
+                                         bool return_capture_params = false,
+                                         bool skip_token_update = false);
+
+  void update_tokens(const torch::Tensor& tokens,
+                     const ModelInputParams& params,
+                     uint32_t actual_num_tokens,
+                     uint32_t padded_num_tokens);
 
   // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens = 0) const {
@@ -198,7 +208,8 @@ class GraphPersistentParam {
                                    const torch::Tensor& k_cache,
                                    const torch::Tensor& v_cache,
                                    const torch::Tensor& block_tables,
-                                   const ModelInputParams& input_params,
+                                   const torch::Tensor& kv_seq_lens,
+                                   const std::vector<int32_t>& kv_seq_lens_vec,
                                    aclrtStream stream);
 
   std::vector<int32_t> update_expanded_spec_decode_attention(
@@ -221,11 +232,19 @@ class GraphPersistentParam {
   // speculative decode mode), the mask needs to be passed to the attention
   // operation
   torch::Tensor persistent_mask_;
+  bool attention_mask_is_zero_ = true;
   torch::Tensor hidden_states_;
 
   torch::Tensor q_seq_lens_;
   torch::Tensor kv_seq_lens_;
   torch::Tensor expanded_kv_seq_lens_;
+  bool q_seq_lens_all_ones_ = true;
+  bool normal_decode_block_tables_cache_valid_ = false;
+  int64_t cached_decode_block_table_len_ = 0;
+  std::vector<std::string> cached_decode_request_ids_;
+  std::vector<int32_t> cached_decode_block_counts_;
+  std::vector<int32_t> padded_kv_seq_lens_vec_;
+  std::vector<int32_t> padded_q_seq_lens_vec_;
 
   // for deepseekv3.2
   torch::Tensor q_cu_seq_lens_;
@@ -287,6 +306,11 @@ class AclGraph {
                      std::vector<KVCache>& kv_cache,
                      const ModelInputParams& params);
 
+  void prepare_replay_inputs(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_cache,
+                             const ModelInputParams& params);
+
   // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
     return persistent_param_.hidden_states(actual_num_tokens);
@@ -310,6 +334,7 @@ class AclGraph {
   // Cached capture stream, initialized on first capture
   std::optional<c10_npu::NPUStream> capture_stream_;
   c10::DeviceIndex device_index_;
+  bool replay_inputs_prepared_ = false;
 };
 
 // Executor implementation using ACL graph optimization
@@ -331,6 +356,11 @@ class AclGraphExecutorImpl : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelInputParams& params) override;
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelInputParams& params) override;
+
   static std::optional<std::pair<torch::Tensor, torch::Tensor>>
   find_first_full_attention_cache(const std::vector<KVCache>& kv_caches);
 
@@ -342,11 +372,17 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   torch::Device device_;
   runtime::Options options_;
 
-  // Lazy-loaded ACL graphs for different num_tokens.
-  absl::flat_hash_map<uint64_t, std::unique_ptr<AclGraph>> graphs_;
+  struct GraphSlot {
+    std::unique_ptr<GraphPersistentParam> persistent_param;
+    absl::flat_hash_map<uint64_t, std::unique_ptr<AclGraph>> graphs;
+  };
 
-  // Persistent parameters shared across all AclGraph instances
-  std::unique_ptr<GraphPersistentParam> persistent_param_;
+  // Double-buffer persistent graph inputs so preparing the next replay never
+  // mutates buffers read by the graph currently replaying.
+  std::array<GraphSlot, 2> graph_slots_;
+  std::mutex graph_slots_mutex_;
+  int next_replay_slot_ = 0;
+  int last_started_replay_slot_ = -1;
 
   // Get bucket num_tokens for given num_tokens
   // For num_tokens < 8: use 1, 2, 4, 8

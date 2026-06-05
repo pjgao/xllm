@@ -468,8 +468,19 @@ void WorkerImpl::update_last_step_output(
 ForwardInput WorkerImpl::update_input_by_last_step_output(
     ForwardInput& inputs) {
 #if defined(USE_NPU)
+  if (FLAGS_enable_graph && enable_schedule_overlap() &&
+      options_.backend() == "llm" &&
+      inputs.input_params.batch_forward_type.has_decode()) {
+    xllm::kernel::npu::replace_token(
+        inputs.token_ids,
+        last_step_output_.sample_output.next_tokens,
+        /*synchronize_stream=*/false);
+    inputs.input_params.graph_buffer.input_tokens_override = inputs.token_ids;
+    return inputs;
+  }
   xllm::kernel::npu::replace_token(inputs.token_ids,
-                                   last_step_output_.sample_output.next_tokens);
+                                   last_step_output_.sample_output.next_tokens,
+                                   /*synchronize_stream=*/false);
 #else
   auto& flatten_tokens = inputs.token_ids;
   auto neg_mask = (flatten_tokens < 0);
@@ -583,6 +594,16 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
         }
       }
     }
+
+    if (FLAGS_enable_graph && enable_schedule_overlap() &&
+        options_.backend() == "llm" &&
+        input_params.batch_forward_type.has_decode()) {
+      model_executor_->prepare_graph_input(processed_input.token_ids,
+                                           processed_input.positions,
+                                           kv_caches_,
+                                           processed_input.input_params);
+    }
+
 #endif
   };
 
