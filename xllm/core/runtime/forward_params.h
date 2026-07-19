@@ -532,6 +532,8 @@ struct ForwardInput {
     inputs.step_decode = step_decode;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
     inputs.kv_slot_layout = kv_slot_layout;
+    inputs.cp_partitioned = cp_partitioned;
+    inputs.metadata_ready_event = metadata_ready_event;
   }
 
   void set_host_views(ForwardInput& inputs) const {
