@@ -2238,6 +2238,9 @@ inline void initialize_device_buffer_session(ReadContext& context,
   std::memcpy(
       forward_input.input_host_buffer.data_ptr(), payload_base, payload_size);
   const torch::Tensor& host_input_buffer = forward_input.input_host_buffer;
+  context.tensor_cursor =
+      static_cast<const char*>(host_input_buffer.data_ptr()) +
+      tensor_arena_offset;
 
   auto device_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(device);
