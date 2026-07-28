@@ -658,6 +658,48 @@ bool MTPWorkerImpl::supports_spec_verify_graph_input_update() const {
   return speculative_verify_capabilities().supports_in_graph_input_update;
 }
 
+bool MTPWorkerImpl::can_use_spec_verify_graph_update(
+    const ForwardInput& input) const {
+#if defined(USE_NPU)
+  const auto& block_tables = input.input_params.attention.host.block_tables;
+  if (!enable_spec_verify_graph_update() || !block_tables.defined() ||
+      block_tables.dim() != 2 || block_tables.size(0) != 1) {
+    return false;
+  }
+  return supports_speculative_verify_graph_layout(
+      speculative_verify_capabilities(),
+      {/*num_speculative_tokens=*/options_.num_speculative_tokens(),
+       /*num_sequences=*/input.input_params.meta.num_sequences,
+       /*block_size=*/options_.block_size(),
+       /*block_table_width=*/spec_verify_block_table_width(block_tables)});
+#else
+  (void)input;
+  return false;
+#endif
+}
+
+int64_t MTPWorkerImpl::spec_verify_block_table_width(
+    const torch::Tensor& block_tables) const {
+  CHECK(block_tables.defined() && block_tables.dim() == 2);
+  CHECK_GT(options_.block_size(), 0);
+  int64_t required_width = block_tables.size(1);
+  if (impl_ != nullptr) {
+    const int64_t max_sequence_length =
+        impl_->context_.get_model_args().max_seq_len();
+    if (max_sequence_length > 0) {
+      required_width =
+          std::max(required_width,
+                   (max_sequence_length + options_.block_size() - 1) /
+                       options_.block_size());
+    }
+  }
+  int64_t padded_width = 64;
+  while (padded_width < required_width) {
+    padded_width *= 2;
+  }
+  return padded_width;
+}
+
 bool MTPWorkerImpl::use_chunked_prefill_spec_verify_path() const {
   return speculative_verify_capabilities().requires_causal_chunked_prefill;
 }
@@ -787,16 +829,7 @@ bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
-  if (pending_draft_context_.output.has_value()) {
-    // The preceding validation may have speculatively submitted draft1 before
-    // the scheduler learned that the batch had finished.  Keep its graph/input
-    // buffers alive until the queued work completes, then discard the result.
-    // This is a batch-exit slow path and is never taken in steady decode.
-    const int32_t ret = compute_stream_->synchronize();
-    CHECK_EQ(ret, 0) << "failed to drain final MTP draft prelaunch, ret="
-                     << ret;
-    pending_draft_context_ = PendingDraftContext();
-  }
+  drain_pending_draft_context();
   flush_pending_target_context();
 
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
@@ -876,6 +909,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     const ForwardInput& input) {
+  // Prefill/recompute establishes a new KV generation. A draft submitted by
+  // the preceding decode iteration must not survive this boundary even when
+  // the scheduler later reuses the same request and embedding identifiers.
+  drain_pending_draft_context();
   flush_pending_target_context();
 
   Timer timer;
@@ -1024,10 +1061,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     // A batch transition invalidates the speculative prelaunch.  Drain it
     // before releasing its graph/input buffers; this slow path is outside
     // steady decode and preserves cache/buffer lifetime correctness.
-    const int32_t ret = compute_stream_->synchronize();
-    CHECK_EQ(ret, 0) << "failed to drain stale MTP draft prelaunch, ret="
-                     << ret;
-    pending_draft_context_ = PendingDraftContext();
+    drain_pending_draft_context();
   }
   if (!use_device_target_context) {
     // Batch transitions are uncommon in steady decode.  Materialize the most
@@ -1415,8 +1449,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     base_positions = validate_input.positions.view({batch_size, num_val_tokens})
                          .select(/*dim=*/1, /*index=*/0)
                          .contiguous();
-    base_kv_seq_lens = validate_kv_seq_lens.flatten().slice(0, 0, batch_size) -
-                       options_.num_speculative_tokens();
+    base_kv_seq_lens =
+        mtp_async::extract_base_kv_seq_lens(validate_kv_seq_lens,
+                                            batch_size,
+                                            num_val_tokens,
+                                            options_.num_speculative_tokens());
 
     accepted_tokens_host.copy_(val_output.next_tokens,
                                /*non_blocking=*/true);
@@ -1540,6 +1577,20 @@ bool MTPWorkerImpl::device_target_context_ready_for_batch(
              input.input_params.embedding.embedding_ids &&
          device_context_ready_request_ids_ ==
              input.input_params.embedding.request_ids;
+}
+
+void MTPWorkerImpl::drain_pending_draft_context() {
+  if (pending_draft_context_.output.has_value()) {
+    // Pending output and prepared input own graph buffers referenced by queued
+    // work. This transition path is outside steady decode, so wait before
+    // releasing them.
+    const int32_t ret = compute_stream_->synchronize();
+    CHECK_EQ(ret, 0) << "failed to drain stale MTP draft prelaunch, ret="
+                     << ret;
+    pending_draft_context_ = PendingDraftContext();
+  }
+  device_context_ready_embedding_ids_.clear();
+  device_context_ready_request_ids_.clear();
 }
 
 void MTPWorkerImpl::flush_pending_target_context() {
@@ -1842,8 +1893,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   const int32_t block_size = options_.block_size();
 #if defined(USE_NPU)
   const bool use_graph_internal_verify_update =
-      enable_spec_verify_graph_update() &&
-      supports_spec_verify_graph_input_update() && num_sequences == 1;
+      can_use_spec_verify_graph_update(input);
 #else
   const bool use_graph_internal_verify_update = false;
 #endif
@@ -2073,10 +2123,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     CHECK_EQ(attention.host.block_tables.scalar_type(), torch::kInt32);
     const int64_t active_block_table_width =
         attention.host.block_tables.size(1);
-    int64_t verify_block_table_width = 64;
-    while (verify_block_table_width < active_block_table_width) {
-      verify_block_table_width *= 2;
-    }
+    const int64_t verify_block_table_width =
+        spec_verify_block_table_width(attention.host.block_tables);
     if (active_block_table_width != verify_block_table_width) {
       torch::Tensor padded_block_tables = torch::zeros(
           {1, verify_block_table_width},
@@ -2166,11 +2214,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
 bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
     const ForwardInput& input) {
 #if defined(USE_NPU)
-  if (!enable_spec_verify_graph_update() ||
-      !supports_spec_verify_graph_input_update() ||
-      options_.num_speculative_tokens() < 3 ||
-      options_.num_speculative_tokens() > 5 ||
-      input.input_params.meta.num_sequences != 1 ||
+  if (!can_use_spec_verify_graph_update(input) ||
       input.input_params.embedding.linear_state_ids.size() != 1 ||
       embedding_cache_ == nullptr ||
       input.input_params.embedding.embedding_ids.empty()) {
@@ -2187,10 +2231,8 @@ bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
   if (accepted_prefix_lengths.size() != 1) {
     return false;
   }
-  int64_t verify_block_table_width = 64;
-  while (verify_block_table_width < block_tables.size(1)) {
-    verify_block_table_width *= 2;
-  }
+  const int64_t verify_block_table_width =
+      spec_verify_block_table_width(block_tables);
   return impl_->prepare_static_mtp_graph_tasks(
       input.input_params.embedding.linear_state_ids.front(),
       accepted_prefix_lengths.front(),

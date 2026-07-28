@@ -113,6 +113,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                               ForwardInput& prefill_inputs);
   SpeculativeVerifyCapabilities speculative_verify_capabilities() const;
   bool supports_spec_verify_graph_input_update() const;
+  bool can_use_spec_verify_graph_update(const ForwardInput& input) const;
+  int64_t spec_verify_block_table_width(
+      const torch::Tensor& block_tables) const;
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
@@ -172,6 +175,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
   bool device_target_context_ready_for_batch(const ForwardInput& input) const;
+  void drain_pending_draft_context();
   void flush_pending_target_context();
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;

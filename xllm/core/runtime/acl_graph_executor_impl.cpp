@@ -49,6 +49,7 @@ constexpr uint64_t kSpecVerifyBucketMask = (1ull << 16) - 1;
 constexpr uint64_t kSpecVerifyFieldMask = (1ull << 16) - 1;
 constexpr uint64_t kSpecVerifyExpandedBlockMask = (1ull << 15) - 1;
 constexpr uint64_t kStaticGraphTaskHashSeed = 0x6a09e667f3bcc909ull;
+constexpr size_t kMaxStaticMtpGraphVariantsPerSlot = 16;
 
 bool uses_static_mtp_graph_task_variant(const ModelInputParams& params,
                                         uint32_t bucket_num_tokens) {
@@ -510,10 +511,14 @@ ModelOutput AclGraph::replay(CausalLM* model,
         positions,
         params,
         persistent_param_.supports_fused_spec_verify_metadata_update(params));
-    CHECK(same_tensor_sources(internal_spec_verify_input_sources_,
-                              current_sources))
-        << "speculative verify graph input update source address changed "
-           "across replay";
+    if (!same_tensor_sources(internal_spec_verify_input_sources_,
+                             current_sources)) {
+      LOG_FIRST_N(ERROR, 1)
+          << "Falling back to eager speculative verification because graph "
+             "input source storage moved after capture.";
+      COUNTER_INC(num_model_execution_total_eager);
+      return model->forward(tokens, positions, kv_cache, params);
+    }
     if (persistent_param_.supports_fused_spec_verify_token_update(params)) {
       persistent_param_.run_fused_spec_verify_token_update(params);
     }
@@ -789,7 +794,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   // Check if captured graph exists for this bucket num_tokens
   int32_t slot_idx = 0;
-  AclGraph* replay_graph = nullptr;
+  std::shared_ptr<AclGraph> replay_graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     slot_idx = next_replay_slot_;
@@ -799,7 +804,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     slot.is_prepared = false;
     auto it = slot.graphs.find(graph_key);
     if (it != slot.graphs.end()) {
-      replay_graph = it->second.get();
+      replay_graph = it->second;
     }
   }
   auto& active_slot = graph_slots_[slot_idx];
@@ -825,7 +830,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
   auto graph =
-      std::make_unique<AclGraph>(active_persistent_param, device_.index());
+      std::make_shared<AclGraph>(active_persistent_param, device_.index());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = false;
@@ -850,7 +855,19 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
               << bucket_num_tokens << " (actual num_tokens: " << n_tokens
               << ") done";
 
-    // Save the graph for future reuse
+    const bool static_mtp_variant =
+        uses_static_mtp_graph_task_variant(params_single, bucket_num_tokens);
+    if (static_mtp_variant) {
+      while (active_slot.static_mtp_graph_keys.size() >=
+             kMaxStaticMtpGraphVariantsPerSlot) {
+        const uint64_t evicted_key = active_slot.static_mtp_graph_keys.front();
+        active_slot.static_mtp_graph_keys.pop_front();
+        active_slot.graphs.erase(evicted_key);
+      }
+      active_slot.static_mtp_graph_keys.push_back(graph_key);
+    }
+    // Save the graph for future reuse. shared_ptr keeps a replay/prepare that
+    // already left the map alive if a later capture evicts this static variant.
     active_slot.graphs[graph_key] = std::move(graph);
 
     // Return the output from capture (no need to replay since capture
@@ -919,7 +936,7 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
 
-  AclGraph* graph = nullptr;
+  std::shared_ptr<AclGraph> graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     if (last_started_replay_slot_ < 0) {
@@ -935,7 +952,7 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     if (it == slot.graphs.end()) {
       return;
     }
-    graph = it->second.get();
+    graph = it->second;
     slot.is_prepared = true;
   }
   graph->prepare_replay_inputs(tokens, positions, kv_caches, params);
@@ -960,7 +977,7 @@ bool AclGraphExecutorImpl::prepare_static_graph_tasks(
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
-  AclGraph* graph = nullptr;
+  std::shared_ptr<AclGraph> graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     auto& graphs = graph_slots_[0].graphs;
@@ -968,7 +985,7 @@ bool AclGraphExecutorImpl::prepare_static_graph_tasks(
     if (it == graphs.end()) {
       return false;
     }
-    graph = it->second.get();
+    graph = it->second;
   }
   return graph->prepare_static_graph_tasks(params, *signal_stream.get_stream());
 }
@@ -992,7 +1009,7 @@ bool AclGraphExecutorImpl::prepare_static_mtp_graph_tasks(
                             bucket_num_tokens;
   const uint64_t graph_key = static_mtp_graph_task_key(
       base_key, linear_state_id, num_accepted_tokens, spec_width);
-  AclGraph* graph = nullptr;
+  std::shared_ptr<AclGraph> graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     auto& graphs = graph_slots_[0].graphs;
@@ -1000,7 +1017,7 @@ bool AclGraphExecutorImpl::prepare_static_mtp_graph_tasks(
     if (it == graphs.end()) {
       return false;
     }
-    graph = it->second.get();
+    graph = it->second;
   }
   return graph->prepare_static_mtp_graph_tasks(linear_state_id,
                                                num_accepted_tokens,

@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+
 namespace xllm {
 
 // Describes target-model requirements at the speculative verification seam.
@@ -24,6 +26,32 @@ namespace xllm {
 struct SpeculativeVerifyCapabilities {
   bool requires_causal_chunked_prefill = false;
   bool supports_in_graph_input_update = false;
+  int32_t min_graph_update_speculative_tokens = 3;
+  int32_t max_graph_update_speculative_tokens = 5;
+  int32_t graph_update_block_size = 128;
+  int64_t max_graph_update_block_table_width = (1 << 15) - 1;
 };
+
+struct SpeculativeVerifyGraphLayout {
+  int32_t num_speculative_tokens = 0;
+  int32_t num_sequences = 0;
+  int32_t block_size = 0;
+  int64_t block_table_width = 0;
+};
+
+inline bool supports_speculative_verify_graph_layout(
+    const SpeculativeVerifyCapabilities& capabilities,
+    const SpeculativeVerifyGraphLayout& layout) {
+  return capabilities.supports_in_graph_input_update &&
+         layout.num_speculative_tokens >=
+             capabilities.min_graph_update_speculative_tokens &&
+         layout.num_speculative_tokens <=
+             capabilities.max_graph_update_speculative_tokens &&
+         layout.num_sequences == 1 &&
+         layout.block_size == capabilities.graph_update_block_size &&
+         layout.block_table_width > 0 &&
+         layout.block_table_width <=
+             capabilities.max_graph_update_block_table_width;
+}
 
 }  // namespace xllm

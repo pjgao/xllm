@@ -48,6 +48,29 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
   return CombinedDraftExecutionPath::UNSUPPORTED;
 }
 
+torch::Tensor extract_base_kv_seq_lens(
+    const torch::Tensor& validate_kv_seq_lens,
+    int64_t batch_size,
+    int64_t num_validation_tokens,
+    int64_t num_speculative_tokens) {
+  CHECK(validate_kv_seq_lens.defined());
+  CHECK_GT(batch_size, 0);
+  CHECK_GT(num_validation_tokens, 0);
+  CHECK_GE(num_speculative_tokens, 0);
+
+  torch::Tensor flattened = validate_kv_seq_lens.flatten();
+  torch::Tensor sequence_baselines;
+  if (flattened.numel() == batch_size) {
+    sequence_baselines = flattened;
+  } else {
+    CHECK_EQ(flattened.numel(), batch_size * num_validation_tokens)
+        << "validation KV lengths must be sequence-scoped or row-major";
+    sequence_baselines = flattened.view({batch_size, num_validation_tokens})
+                             .select(/*dim=*/1, /*index=*/0);
+  }
+  return sequence_baselines.contiguous() - num_speculative_tokens;
+}
+
 AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                    const torch::Tensor& accepted_embeddings,
                                    const torch::Tensor& embedding_placeholder,
