@@ -356,7 +356,7 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
     // exposes the expanded attention plus linear-state layout required by the
     // NPU graph input updater.
     return {/*requires_causal_chunked_prefill=*/true,
-            /*supports_in_graph_input_update=*/true};
+            /*supports_explicit_spec_verify_replay_update=*/true};
   }
 
   layer::LmHead get_lm_head() { return lm_head_; }

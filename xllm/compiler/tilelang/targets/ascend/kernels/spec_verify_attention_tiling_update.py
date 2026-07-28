@@ -20,6 +20,12 @@ from .utils import DEFAULT_ASCEND_PASS_CONFIGS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
 SUPPORTED_SPEC_WIDTHS = (4, 5, 6)
+MAX_KV_SEQ_LEN_INDEX = 22
+KV_SPLIT_LENGTH_INDEX = 23
+KV_SPLIT_CORE_COUNT_INDEX = 24
+TILING_BATCH_OFFSET = 44
+TILING_BATCH_STRIDE = 17
+TILING_BATCH_KV_LEN_OFFSET = 1
 
 
 def build_spec_verify_attention_tiling_update_kernel(
@@ -45,31 +51,44 @@ def build_spec_verify_attention_tiling_update_kernel(
             # max_kv here and consuming it after the branch is not valid.
             if spec_width == 4:
                 max_kv = max_kv_4
-                tiling_data[22] = max_kv
-                if max_kv % block_size == 0:
-                    tiling_data[23] = max_kv
-                else:
-                    tiling_data[23] = T.ceildiv(max_kv, block_size) * block_size
+                kv_split_core_num = tiling_data[KV_SPLIT_CORE_COUNT_INDEX]
+                tiling_data[MAX_KV_SEQ_LEN_INDEX] = max_kv
+                tiling_data[KV_SPLIT_LENGTH_INDEX] = (
+                    T.ceildiv(
+                        T.ceildiv(max_kv, block_size), kv_split_core_num
+                    )
+                    * block_size
+                )
             elif spec_width == 5:
                 max_kv = T.max(max_kv_4, src_kv_seq_lens[4])
-                tiling_data[22] = max_kv
-                if max_kv % block_size == 0:
-                    tiling_data[23] = max_kv
-                else:
-                    tiling_data[23] = T.ceildiv(max_kv, block_size) * block_size
+                kv_split_core_num = tiling_data[KV_SPLIT_CORE_COUNT_INDEX]
+                tiling_data[MAX_KV_SEQ_LEN_INDEX] = max_kv
+                tiling_data[KV_SPLIT_LENGTH_INDEX] = (
+                    T.ceildiv(
+                        T.ceildiv(max_kv, block_size), kv_split_core_num
+                    )
+                    * block_size
+                )
             else:
                 max_kv = T.max(
                     T.max(max_kv_4, src_kv_seq_lens[4]),
                     src_kv_seq_lens[5],
                 )
-                tiling_data[22] = max_kv
-                if max_kv % block_size == 0:
-                    tiling_data[23] = max_kv
-                else:
-                    tiling_data[23] = T.ceildiv(max_kv, block_size) * block_size
+                kv_split_core_num = tiling_data[KV_SPLIT_CORE_COUNT_INDEX]
+                tiling_data[MAX_KV_SEQ_LEN_INDEX] = max_kv
+                tiling_data[KV_SPLIT_LENGTH_INDEX] = (
+                    T.ceildiv(
+                        T.ceildiv(max_kv, block_size), kv_split_core_num
+                    )
+                    * block_size
+                )
             for i in T.serial(spec_width):
                 kv_len = src_kv_seq_lens[i]
-                tiling_data[44 + i * 17 + 1] = kv_len
+                tiling_data[
+                    TILING_BATCH_OFFSET
+                    + i * TILING_BATCH_STRIDE
+                    + TILING_BATCH_KV_LEN_OFFSET
+                ] = kv_len
 
     return spec_verify_attention_tiling_update
 

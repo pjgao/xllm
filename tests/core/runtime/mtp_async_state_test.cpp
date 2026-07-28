@@ -34,52 +34,49 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
             CombinedDraftExecutionPath::UNSUPPORTED);
 }
 
-TEST(MtpAsyncStateTest, GatesGraphUpdateAcrossSpeculativeDepths) {
+TEST(MtpAsyncStateTest, SeparatesGraphUpdateSupportFromPerformancePolicy) {
   SpeculativeVerifyCapabilities capabilities;
-  capabilities.supports_in_graph_input_update = true;
+  capabilities.supports_explicit_spec_verify_replay_update = true;
 
   for (int32_t speculative_tokens = 1; speculative_tokens <= 8;
        ++speculative_tokens) {
-    const bool expected = speculative_tokens >= 3 && speculative_tokens <= 5;
+    const bool supported = speculative_tokens >= 3 && speculative_tokens <= 5;
+    const bool optimized = speculative_tokens >= 3 && speculative_tokens <= 4;
     EXPECT_EQ(supports_npu_speculative_verify_graph_layout(
-                  capabilities.supports_in_graph_input_update,
                   {/*num_speculative_tokens=*/speculative_tokens,
                    /*num_sequences=*/1,
                    /*block_size=*/128,
                    /*block_table_width=*/64}),
-              expected);
+              supported);
+    EXPECT_EQ(should_use_npu_speculative_verify_graph_update(
+                  capabilities.supports_explicit_spec_verify_replay_update,
+                  {/*num_speculative_tokens=*/speculative_tokens,
+                   /*num_sequences=*/1,
+                   /*block_size=*/128,
+                   /*block_table_width=*/64}),
+              optimized);
   }
+}
+
+TEST(MtpAsyncStateTest, ComputesSharedSpecVerifyBlockTableCapacity) {
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 128), 2049);
+  EXPECT_EQ(speculative_verify_block_table_capacity(300000, 128), 2345);
 }
 
 TEST(MtpAsyncStateTest, RejectsUnsupportedGraphUpdateLayouts) {
   SpeculativeVerifyCapabilities capabilities;
-  capabilities.supports_in_graph_input_update = true;
+  capabilities.supports_explicit_spec_verify_replay_update = true;
 
   EXPECT_FALSE(supports_npu_speculative_verify_graph_layout(
-      capabilities.supports_in_graph_input_update,
       {/*num_speculative_tokens=*/3,
        /*num_sequences=*/2,
        /*block_size=*/128,
        /*block_table_width=*/64}));
   EXPECT_FALSE(supports_npu_speculative_verify_graph_layout(
-      capabilities.supports_in_graph_input_update,
       {/*num_speculative_tokens=*/3,
        /*num_sequences=*/1,
        /*block_size=*/64,
        /*block_table_width=*/64}));
-}
-
-TEST(MtpAsyncStateTest, ExtractsEachSequencesRowMajorKvBaseline) {
-  const torch::Tensor validate_kv_seq_lens = torch::tensor(
-      {{100, 101, 102, 103}, {200, 201, 202, 203}, {300, 301, 302, 303}},
-      torch::kInt);
-
-  EXPECT_TRUE(
-      torch::equal(extract_base_kv_seq_lens(validate_kv_seq_lens,
-                                            /*batch_size=*/3,
-                                            /*num_validation_tokens=*/4,
-                                            /*num_speculative_tokens=*/3),
-                   torch::tensor({100, 200, 300}, torch::kInt)));
 }
 
 TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
@@ -104,18 +101,6 @@ TEST(MtpAsyncStateTest, LeavesOrdinaryEagerTokensUnchanged) {
 
   EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
   EXPECT_TRUE(torch::equal(materialized, verify_tokens));
-}
-
-TEST(MtpAsyncStateTest, PreservesSequenceScopedKvBaselineLayout) {
-  const torch::Tensor validate_kv_seq_lens =
-      torch::tensor({103, 203, 303}, torch::kInt);
-
-  EXPECT_TRUE(
-      torch::equal(extract_base_kv_seq_lens(validate_kv_seq_lens,
-                                            /*batch_size=*/3,
-                                            /*num_validation_tokens=*/4,
-                                            /*num_speculative_tokens=*/3),
-                   torch::tensor({100, 200, 300}, torch::kInt)));
 }
 
 TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {

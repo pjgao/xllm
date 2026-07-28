@@ -59,6 +59,7 @@ class Executor final {
                                       int64_t num_accepted_tokens,
                                       int64_t spec_width,
                                       int64_t block_table_width,
+                                      int64_t spec_verify_max_kv_seq_len,
                                       const Stream& signal_stream);
 
  private:

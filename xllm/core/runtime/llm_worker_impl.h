@@ -76,6 +76,7 @@ class LLMWorkerImpl : public WorkerImpl {
                                       int64_t num_accepted_tokens,
                                       int64_t spec_width,
                                       int64_t block_table_width,
+                                      int64_t spec_verify_max_kv_seq_len,
                                       const Stream& signal_stream);
 
   layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };

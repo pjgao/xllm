@@ -57,11 +57,13 @@ class ExecutorImpl {
     return false;
   }
 
-  virtual bool prepare_static_mtp_graph_tasks(int64_t /*linear_state_id*/,
-                                              int64_t /*num_accepted_tokens*/,
-                                              int64_t /*spec_width*/,
-                                              int64_t /*block_table_width*/,
-                                              const Stream& /*signal_stream*/) {
+  virtual bool prepare_static_mtp_graph_tasks(
+      int64_t /*linear_state_id*/,
+      int64_t /*num_accepted_tokens*/,
+      int64_t /*spec_width*/,
+      int64_t /*block_table_width*/,
+      int64_t /*spec_verify_max_kv_seq_len*/,
+      const Stream& /*signal_stream*/) {
     return false;
   }
 };
