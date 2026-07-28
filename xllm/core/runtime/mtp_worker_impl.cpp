@@ -662,7 +662,10 @@ bool MTPWorkerImpl::can_use_spec_verify_graph_update(
     const ForwardInput& input) const {
 #if defined(USE_NPU)
   const auto& block_tables = input.input_params.attention.host.block_tables;
-  if (!enable_spec_verify_graph_update() || !block_tables.defined() ||
+  if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
+      !::xllm::ExecutionConfig::get_instance()
+           .enable_graph_mode_decode_no_padding() ||
+      !enable_spec_verify_graph_update() || !block_tables.defined() ||
       block_tables.dim() != 2 || block_tables.size(0) != 1) {
     return false;
   }
