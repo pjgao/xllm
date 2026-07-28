@@ -41,8 +41,8 @@ TEST(MtpAsyncStateTest, GatesGraphUpdateAcrossSpeculativeDepths) {
   for (int32_t speculative_tokens = 1; speculative_tokens <= 8;
        ++speculative_tokens) {
     const bool expected = speculative_tokens >= 3 && speculative_tokens <= 5;
-    EXPECT_EQ(supports_speculative_verify_graph_layout(
-                  capabilities,
+    EXPECT_EQ(supports_npu_speculative_verify_graph_layout(
+                  capabilities.supports_in_graph_input_update,
                   {/*num_speculative_tokens=*/speculative_tokens,
                    /*num_sequences=*/1,
                    /*block_size=*/128,
@@ -55,18 +55,18 @@ TEST(MtpAsyncStateTest, RejectsUnsupportedGraphUpdateLayouts) {
   SpeculativeVerifyCapabilities capabilities;
   capabilities.supports_in_graph_input_update = true;
 
-  EXPECT_FALSE(
-      supports_speculative_verify_graph_layout(capabilities,
-                                               {/*num_speculative_tokens=*/3,
-                                                /*num_sequences=*/2,
-                                                /*block_size=*/128,
-                                                /*block_table_width=*/64}));
-  EXPECT_FALSE(
-      supports_speculative_verify_graph_layout(capabilities,
-                                               {/*num_speculative_tokens=*/3,
-                                                /*num_sequences=*/1,
-                                                /*block_size=*/64,
-                                                /*block_table_width=*/64}));
+  EXPECT_FALSE(supports_npu_speculative_verify_graph_layout(
+      capabilities.supports_in_graph_input_update,
+      {/*num_speculative_tokens=*/3,
+       /*num_sequences=*/2,
+       /*block_size=*/128,
+       /*block_table_width=*/64}));
+  EXPECT_FALSE(supports_npu_speculative_verify_graph_layout(
+      capabilities.supports_in_graph_input_update,
+      {/*num_speculative_tokens=*/3,
+       /*num_sequences=*/1,
+       /*block_size=*/64,
+       /*block_table_width=*/64}));
 }
 
 TEST(MtpAsyncStateTest, ExtractsEachSequencesRowMajorKvBaseline) {
