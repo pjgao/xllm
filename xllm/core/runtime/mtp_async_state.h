@@ -30,6 +30,15 @@ enum class CombinedDraftExecutionPath {
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type);
 
+// Extract one validation KV baseline per logical sequence. Decode validation
+// stores one row per speculative token, while chunked-prefill validation may
+// already store a single sequence-scoped value.
+torch::Tensor extract_base_kv_seq_lens(
+    const torch::Tensor& validate_kv_seq_lens,
+    int64_t batch_size,
+    int64_t num_validation_tokens,
+    int64_t num_speculative_tokens);
+
 // Device-resident state derived from target verification. base_positions and
 // base_kv_seq_lens point at the logical position immediately after the accepted
 // prefix and are therefore the base of the next draft iteration.

@@ -18,6 +18,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include "core/framework/model/speculative_verify_capabilities.h"
+
 namespace xllm::mtp_async {
 namespace {
 
@@ -30,6 +32,66 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
             CombinedDraftExecutionPath::UNSUPPORTED);
   EXPECT_EQ(classify_combined_draft_execution_path("mimo_mtp"),
             CombinedDraftExecutionPath::UNSUPPORTED);
+}
+
+TEST(MtpAsyncStateTest, GatesGraphUpdateAcrossSpeculativeDepths) {
+  SpeculativeVerifyCapabilities capabilities;
+  capabilities.supports_in_graph_input_update = true;
+
+  for (int32_t speculative_tokens = 1; speculative_tokens <= 8;
+       ++speculative_tokens) {
+    const bool expected = speculative_tokens >= 3 && speculative_tokens <= 5;
+    EXPECT_EQ(supports_speculative_verify_graph_layout(
+                  capabilities,
+                  {/*num_speculative_tokens=*/speculative_tokens,
+                   /*num_sequences=*/1,
+                   /*block_size=*/128,
+                   /*block_table_width=*/64}),
+              expected);
+  }
+}
+
+TEST(MtpAsyncStateTest, RejectsUnsupportedGraphUpdateLayouts) {
+  SpeculativeVerifyCapabilities capabilities;
+  capabilities.supports_in_graph_input_update = true;
+
+  EXPECT_FALSE(
+      supports_speculative_verify_graph_layout(capabilities,
+                                               {/*num_speculative_tokens=*/3,
+                                                /*num_sequences=*/2,
+                                                /*block_size=*/128,
+                                                /*block_table_width=*/64}));
+  EXPECT_FALSE(
+      supports_speculative_verify_graph_layout(capabilities,
+                                               {/*num_speculative_tokens=*/3,
+                                                /*num_sequences=*/1,
+                                                /*block_size=*/64,
+                                                /*block_table_width=*/64}));
+}
+
+TEST(MtpAsyncStateTest, ExtractsEachSequencesRowMajorKvBaseline) {
+  const torch::Tensor validate_kv_seq_lens = torch::tensor(
+      {{103, 104, 105, 106}, {203, 204, 205, 206}, {303, 304, 305, 306}},
+      torch::kInt);
+
+  EXPECT_TRUE(
+      torch::equal(extract_base_kv_seq_lens(validate_kv_seq_lens,
+                                            /*batch_size=*/3,
+                                            /*num_validation_tokens=*/4,
+                                            /*num_speculative_tokens=*/3),
+                   torch::tensor({100, 200, 300}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, PreservesSequenceScopedKvBaselineLayout) {
+  const torch::Tensor validate_kv_seq_lens =
+      torch::tensor({103, 203, 303}, torch::kInt);
+
+  EXPECT_TRUE(
+      torch::equal(extract_base_kv_seq_lens(validate_kv_seq_lens,
+                                            /*batch_size=*/3,
+                                            /*num_validation_tokens=*/4,
+                                            /*num_speculative_tokens=*/3),
+                   torch::tensor({100, 200, 300}, torch::kInt)));
 }
 
 TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {

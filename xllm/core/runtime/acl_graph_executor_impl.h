@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -188,7 +189,8 @@ class AclGraphExecutorImpl : public ExecutorImpl {
 
   struct GraphSlot {
     std::unique_ptr<GraphPersistentParam> persistent_param;
-    absl::flat_hash_map<uint64_t, std::unique_ptr<AclGraph>> graphs;
+    absl::flat_hash_map<uint64_t, std::shared_ptr<AclGraph>> graphs;
+    std::deque<uint64_t> static_mtp_graph_keys;
     bool is_prepared = false;
   };
   std::array<GraphSlot, 2> graph_slots_;

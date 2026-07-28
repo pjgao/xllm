@@ -119,6 +119,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 
 #if defined(USE_NPU)
     if (attn_metadata.use_expanded_decode_for_spec_verify_attention &&
+        model_args_.block_size() == 128 &&
         attn_metadata.expanded_kv_seq_lens.defined() &&
         attn_metadata.expanded_kv_seq_lens.numel() >= 4 &&
         attn_metadata.expanded_kv_seq_lens.numel() <= 6 &&
@@ -126,7 +127,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
       kernel::npu::tilelang::spec_verify_attention_tiling_update(
           attn_metadata.expanded_kv_seq_lens,
           attn_metadata.expanded_paged_attention_tiling_data,
-          /*block_size=*/128);
+          model_args_.block_size());
     }
 #endif
     torch::Tensor h;
