@@ -669,8 +669,8 @@ bool MTPWorkerImpl::can_use_spec_verify_graph_update(
       block_tables.dim() != 2 || block_tables.size(0) != 1) {
     return false;
   }
-  return supports_speculative_verify_graph_layout(
-      speculative_verify_capabilities(),
+  return mtp_async::supports_npu_speculative_verify_graph_layout(
+      supports_spec_verify_graph_input_update(),
       {/*num_speculative_tokens=*/options_.num_speculative_tokens(),
        /*num_sequences=*/input.input_params.meta.num_sequences,
        /*block_size=*/options_.block_size(),

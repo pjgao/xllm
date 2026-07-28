@@ -22,6 +22,11 @@ limitations under the License.
 namespace xllm::mtp_async {
 namespace {
 
+constexpr int32_t kMinGraphUpdateSpeculativeTokens = 3;
+constexpr int32_t kMaxGraphUpdateSpeculativeTokens = 5;
+constexpr int32_t kGraphUpdateBlockSize = 128;
+constexpr int64_t kMaxGraphUpdateBlockTableWidth = (1 << 15) - 1;
+
 torch::Tensor gather_sequence_rows(const torch::Tensor& values,
                                    const torch::Tensor& indices) {
   CHECK_GE(values.dim(), 2);
@@ -39,6 +44,18 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 }
 
 }  // namespace
+
+bool supports_npu_speculative_verify_graph_layout(
+    bool model_supports_in_graph_input_update,
+    const NpuSpeculativeVerifyGraphLayout& layout) {
+  return model_supports_in_graph_input_update &&
+         layout.num_speculative_tokens >= kMinGraphUpdateSpeculativeTokens &&
+         layout.num_speculative_tokens <= kMaxGraphUpdateSpeculativeTokens &&
+         layout.num_sequences == 1 &&
+         layout.block_size == kGraphUpdateBlockSize &&
+         layout.block_table_width > 0 &&
+         layout.block_table_width <= kMaxGraphUpdateBlockTableWidth;
+}
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type) {

@@ -23,6 +23,20 @@ limitations under the License.
 
 namespace xllm::mtp_async {
 
+struct NpuSpeculativeVerifyGraphLayout {
+  int32_t num_speculative_tokens = 0;
+  int32_t num_sequences = 0;
+  int32_t block_size = 0;
+  int64_t block_table_width = 0;
+};
+
+// Backend shape gate for the currently compiled NPU graph-update kernels.
+// Model capabilities describe semantics only and remain independent of these
+// implementation limits.
+bool supports_npu_speculative_verify_graph_layout(
+    bool model_supports_in_graph_input_update,
+    const NpuSpeculativeVerifyGraphLayout& layout);
+
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
   QWEN3_5_PAGED_ATTENTION,
