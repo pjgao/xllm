@@ -31,7 +31,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
-#include "core/util/env_var.h"
+#include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -136,8 +136,7 @@ int64_t infer_actual_batch_size(const ModelInputParams& params) {
 
 bool can_skip_unused_expanded_verify_mask(const ModelInputParams& params,
                                           bool is_hybrid_linear_attention) {
-  return util::get_bool_env("XLLM_NPU_MTP_SKIP_UNUSED_VERIFY_MASK", true) &&
-         params.is_spec_verify &&
+  return params.is_spec_verify &&
          params.meta.batch_forward_type.is_chunked_prefill() &&
          is_hybrid_linear_attention &&
          params.graph.use_expanded_decode_for_spec_verify_attention;
@@ -225,7 +224,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Block table tensors with maximum possible size
   const int64_t block_size = options.block_size();
   const int64_t max_block_table_len =
-      (max_seq_len + block_size - 1) / block_size + 1;
+      mtp_async::speculative_verify_block_table_capacity(max_seq_len,
+                                                         block_size);
   persistent_block_tables_ =
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
@@ -542,6 +542,7 @@ void zero_tensor_tail(torch::Tensor& tensor,
   }
   tensor.slice(/*dim=*/dim, /*start=*/start, /*end=*/end).zero_();
 }
+
 }  // namespace
 
 std::vector<int32_t>
@@ -582,28 +583,19 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
     }
   }
 
-  if (util::get_bool_env("XLLM_NPU_MTP_EXPANDED_KV_DIRECT_COPY", true)) {
-    // The worker has already packed the real rows into a device tensor. Copy
-    // it directly into the stable graph buffer instead of rebuilding the same
-    // data through torch::tensor(host).to(device), which introduces a
-    // synchronous H2D allocation/copy on every target replay.
+  // The worker has already packed the real rows into a device tensor. Copy it
+  // directly into the stable graph buffer instead of rebuilding the same data
+  // through torch::tensor(host).to(device), which would add a synchronous H2D
+  // allocation/copy to every target replay.
+  expanded_kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
+      .copy_(input_params.graph.expanded_kv_seq_lens,
+             /*non_blocking=*/true);
+  if (padded_num_tokens > actual_num_tokens) {
     expanded_kv_seq_lens_
-        .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
-        .copy_(input_params.graph.expanded_kv_seq_lens,
-               /*non_blocking=*/true);
-    if (padded_num_tokens > actual_num_tokens) {
-      expanded_kv_seq_lens_
-          .slice(/*dim=*/0,
-                 /*start=*/actual_num_tokens,
-                 /*end=*/padded_num_tokens)
-          .fill_(1);
-    }
-  } else {
-    torch::Tensor expanded_kv_tensor =
-        torch::tensor(expanded_kv_seq_lens_vec, torch::kInt).to(device_);
-    expanded_kv_seq_lens_
-        .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens)
-        .copy_(expanded_kv_tensor, /*non_blocking=*/true);
+        .slice(/*dim=*/0,
+               /*start=*/actual_num_tokens,
+               /*end=*/padded_num_tokens)
+        .fill_(1);
   }
 
   const int64_t block_table_len =
@@ -699,8 +691,7 @@ void GraphPersistentParam::run_fused_spec_verify_token_update(
       persistent_tokens_);
 }
 
-std::vector<torch::Tensor>
-GraphPersistentParam::capture_spec_verify_input_update(
+void GraphPersistentParam::update_spec_verify_inputs(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
     const ModelInputParams& params,
@@ -749,10 +740,6 @@ GraphPersistentParam::capture_spec_verify_input_update(
       supports_fused_spec_verify_metadata_update(params);
   const bool fused_token_update =
       supports_fused_spec_verify_token_update(params);
-  LOG(INFO) << "Captured speculative verify input update: spec_width="
-            << spec_width << ", fused_token=" << fused_token_update
-            << ", fused_metadata=" << fused_metadata_update;
-
   if (fused_metadata_update) {
     std::vector<torch::Tensor> position_rows;
     position_rows.reserve(3);
@@ -798,12 +785,7 @@ GraphPersistentParam::capture_spec_verify_input_update(
         persistent_expanded_kv_seq_lens,
         expanded_block_rows);
 
-    return {positions,
-            attention.kv_seq_lens,
-            attention.new_cache_slots,
-            attention.block_tables,
-            params.embedding.linear_state_indices,
-            params.num_accepted_tokens};
+    return;
   }
 
   if (!fused_token_update) {
@@ -837,18 +819,6 @@ GraphPersistentParam::capture_spec_verify_input_update(
   persistent_expanded_block_tables_.narrow(0, 0, spec_width)
       .narrow(1, 0, expanded_block_table_len)
       .copy_(params.graph.expanded_block_tables, true);
-
-  return {graph_tokens,
-          positions,
-          attention.q_seq_lens,
-          attention.kv_seq_lens,
-          attention.new_cache_slots,
-          attention.block_tables,
-          params.embedding.linear_state_indices,
-          params.num_accepted_tokens,
-          attention.q_cu_seq_lens,
-          params.graph.expanded_kv_seq_lens,
-          params.graph.expanded_block_tables};
 }
 
 std::optional<ModelInputParams> GraphPersistentParam::update(
@@ -1198,6 +1168,20 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     expanded_kv_seq_lens_vec = update_expanded_spec_decode_attention(
         params, actual_num_tokens, padded_num_tokens);
   }
+  const auto expanded_block_tables_for_graph = [&]() {
+    torch::Tensor block_tables = persistent_expanded_block_tables_.slice(
+        /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
+    if (params.graph.spec_verify_source_addresses_stable) {
+      // Stable verify graphs include the active width in their graph key.
+      return block_tables.narrow(
+          /*dim=*/1,
+          /*start=*/0,
+          /*length=*/params.graph.expanded_block_tables.size(1));
+    }
+    // Generic graphs key only on token shape, so retain the fixed persistent
+    // width used by main instead of binding a request-dependent view.
+    return block_tables;
+  };
 
   if (uses_paged_attention_tiling()) {
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
@@ -1217,8 +1201,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         plan_params.attention.host.kv_seq_lens = expanded_kv_seq_lens_vec;
         plan_params.attention.host.q_seq_lens =
             std::vector<int32_t>(static_cast<size_t>(padded_num_tokens), 1);
-        plan_block_tables = persistent_expanded_block_tables_.slice(
-            /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
+        plan_block_tables = expanded_block_tables_for_graph();
         plan_params.attention.device.block_tables = plan_block_tables;
       } else {
         plan_params.meta.num_sequences =
@@ -1233,6 +1216,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
             persistent_block_tables(static_cast<uint32_t>(padded_batch_size));
         plan_params.attention.device.block_tables = plan_block_tables;
       }
+      std::lock_guard<std::mutex> lock(paged_attention_plan_mutex_);
       plan_paged_attention_tiling(persistent_tokens(padded_num_tokens),
                                   k_cache,
                                   v_cache,
@@ -1319,8 +1303,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           expanded_kv_seq_lens_.slice(
               /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
       params_for_capture->graph.expanded_block_tables =
-          persistent_expanded_block_tables_.slice(
-              /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
+          expanded_block_tables_for_graph();
       params_for_capture->graph.expanded_tiling_data =
           uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
       params_for_capture->graph.expanded_kv_seq_lens_vec =
@@ -1639,13 +1622,92 @@ void parse_pa_host_tiling_buffer(const uint8_t* host_tiling_buffer,
 }
 }  // namespace
 
+std::optional<PagedAttentionPlanDescriptor>
+GraphPersistentParam::classify_spec_verify_paged_attention_plan(
+    const torch::Tensor& tokens,
+    const torch::Tensor& k_cache,
+    const torch::Tensor& v_cache,
+    const ModelInputParams& params) {
+  if (!params.graph.use_expanded_decode_for_spec_verify_attention ||
+      !params.graph.expanded_kv_seq_lens.defined() ||
+      !params.graph.expanded_block_tables.defined() ||
+      params.graph.expanded_kv_seq_lens_vec.empty() || !k_cache.defined() ||
+      !v_cache.defined() || k_cache.numel() == 0 || v_cache.numel() == 0) {
+    return std::nullopt;
+  }
+  const int64_t spec_width = params.graph.expanded_kv_seq_lens.numel();
+  if (spec_width < 4 || spec_width > 6) {
+    return std::nullopt;
+  }
+
+  ModelInputParams plan_params = params;
+  plan_params.meta.num_sequences = static_cast<int32_t>(spec_width);
+  plan_params.attention.device.kv_seq_lens = params.graph.expanded_kv_seq_lens;
+  plan_params.attention.device.q_seq_lens =
+      torch::ones_like(params.graph.expanded_kv_seq_lens);
+  plan_params.attention.device.block_tables =
+      params.graph.expanded_block_tables;
+  plan_params.attention.host.kv_seq_lens =
+      params.graph.expanded_kv_seq_lens_vec;
+  plan_params.attention.host.q_seq_lens =
+      std::vector<int32_t>(static_cast<size_t>(spec_width), 1);
+  std::lock_guard<std::mutex> lock(paged_attention_plan_mutex_);
+  plan_paged_attention_tiling(tokens,
+                              k_cache,
+                              v_cache,
+                              params.graph.expanded_block_tables,
+                              plan_params,
+                              c10_npu::getCurrentNPUStream().stream(),
+                              /*copy_to_device=*/false);
+  return paged_attention_plan_descriptor(spec_width);
+}
+
+std::optional<PagedAttentionPlanDescriptor>
+GraphPersistentParam::paged_attention_plan_descriptor(
+    int64_t spec_width) const {
+  constexpr int64_t kHeaderWords = 44;
+  constexpr int64_t kBatchWords = 17;
+  constexpr int64_t kHeaderWordsIndex = 17;
+  constexpr int64_t kBatchWordsIndex = 18;
+  constexpr int64_t kMaxKvIndex = 22;
+  constexpr int64_t kKvSplitLengthIndex = 23;
+  constexpr int64_t kBatchKvLengthOffset = 45;
+  const int64_t required_words = kHeaderWords + kBatchWords * spec_width;
+  if (spec_width < 4 || spec_width > 6 ||
+      static_cast<int64_t>(paged_attention_tiling_template_.size()) <
+          required_words ||
+      paged_attention_tiling_template_[0] !=
+          static_cast<uint32_t>(spec_width) ||
+      paged_attention_tiling_template_[kHeaderWordsIndex] != kHeaderWords ||
+      paged_attention_tiling_template_[kBatchWordsIndex] != kBatchWords) {
+    return std::nullopt;
+  }
+
+  PagedAttentionPlanDescriptor descriptor;
+  descriptor.normalized_tiling = paged_attention_tiling_template_;
+  descriptor.workspace_size = paged_attention_plan_workspace_size_;
+  for (int64_t i = 0;
+       i < static_cast<int64_t>(descriptor.normalized_tiling.size());
+       ++i) {
+    const bool dynamic_kv_length =
+        i == kMaxKvIndex || i == kKvSplitLengthIndex ||
+        (i >= kBatchKvLengthOffset &&
+         (i - kBatchKvLengthOffset) % kBatchWords == 0);
+    if (dynamic_kv_length) {
+      descriptor.normalized_tiling[static_cast<size_t>(i)] = 0;
+    }
+  }
+  return descriptor;
+}
+
 void GraphPersistentParam::plan_paged_attention_tiling(
     const torch::Tensor& tokens,
     const torch::Tensor& k_cache,
     const torch::Tensor& v_cache,
     const torch::Tensor& block_tables,
     const ModelInputParams& input_params,
-    aclrtStream stream) {
+    aclrtStream stream,
+    bool copy_to_device) {
   // Convert torch tensors to atb tensors
   atb::Tensor atb_k_cache = atb_speed::Utils::AtTensor2Tensor(k_cache);
   atb::Tensor atb_v_cache = atb_speed::Utils::AtTensor2Tensor(v_cache);
@@ -1707,29 +1769,12 @@ void GraphPersistentParam::plan_paged_attention_tiling(
   }
   custom_variantPack.outTensors.push_back(atb_query);
 
-  constexpr size_t kPagedAttentionTilingHeaderWords = 44;
-  constexpr size_t kPagedAttentionTilingBatchWords = 17;
-  const int64_t spec_width = input_params.attention.device.kv_seq_lens.numel();
-  const size_t required_tiling_words =
-      kPagedAttentionTilingHeaderWords +
-      kPagedAttentionTilingBatchWords * static_cast<size_t>(spec_width);
-  const bool has_compatible_tiling_layout =
-      spec_width >= 4 && spec_width <= 6 &&
-      paged_attention_tiling_template_.size() >= required_tiling_words &&
-      paged_attention_tiling_template_.front() ==
-          static_cast<uint32_t>(spec_width);
-  const bool use_graph_tiling_patch =
-      input_params.graph.use_expanded_decode_for_spec_verify_attention &&
-      has_compatible_tiling_layout;
-  if (use_graph_tiling_patch) {
-    return;
-  }
-
   uint64_t custom_workspace_size = 0;
   atb::Status status = custom_pa_op_for_plan_->Setup(
       custom_variantPack, custom_workspace_size, context_for_plan_);
   CHECK_EQ(status, atb::NO_ERROR)
       << "Failed to setup custom paged attention operation for tiling";
+  paged_attention_plan_workspace_size_ = custom_workspace_size;
 
   atb::customize::TilingBufferInfo tiling_buffer_info =
       atb::customize::GetHostTilingBufferFromCustomPagedAttentionOperation(
@@ -1753,14 +1798,17 @@ void GraphPersistentParam::plan_paged_attention_tiling(
     parse_pa_host_tiling_buffer(tiling_buffer_info.tilingBuffer,
                                 tiling_buffer_info.tilingBufferSize);
   }
-  aclError acl_status =
-      aclrtMemcpyAsync(tiling_data_.data_ptr(),
-                       tiling_data_.numel() * sizeof(uint32_t),
-                       tiling_buffer_info.tilingBuffer,
-                       tiling_buffer_info.tilingBufferSize,
-                       ACL_MEMCPY_HOST_TO_DEVICE,
-                       stream);
-  CHECK_EQ(acl_status, ACL_SUCCESS) << "Failed to copy tiling buffer to device";
+  if (copy_to_device) {
+    aclError acl_status =
+        aclrtMemcpyAsync(tiling_data_.data_ptr(),
+                         tiling_data_.numel() * sizeof(uint32_t),
+                         tiling_buffer_info.tilingBuffer,
+                         tiling_buffer_info.tilingBufferSize,
+                         ACL_MEMCPY_HOST_TO_DEVICE,
+                         stream);
+    CHECK_EQ(acl_status, ACL_SUCCESS)
+        << "Failed to copy tiling buffer to device";
+  }
 }
 
 void GraphPersistentParam::update_attention_mask(

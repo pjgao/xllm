@@ -18,12 +18,13 @@ limitations under the License.
 namespace xllm {
 
 // Describes target-model requirements at the speculative verification seam.
-// A model that enables in_graph_input_update guarantees that its validation
-// input follows the expanded-attention and single linear-state layout consumed
-// by the NPU graph updater. Unsupported models keep the conservative defaults.
+// A model that enables explicit_spec_verify_replay_update guarantees that its
+// validation input follows the expanded-attention and single linear-state
+// layout consumed by the NPU replay updater. Unsupported models keep the
+// conservative defaults.
 struct SpeculativeVerifyCapabilities {
   bool requires_causal_chunked_prefill = false;
-  bool supports_in_graph_input_update = false;
+  bool supports_explicit_spec_verify_replay_update = false;
 };
 
 }  // namespace xllm

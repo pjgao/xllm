@@ -112,8 +112,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
   SpeculativeVerifyCapabilities speculative_verify_capabilities() const;
-  bool supports_spec_verify_graph_input_update() const;
-  bool can_use_spec_verify_graph_update(const ForwardInput& input) const;
+  bool supports_explicit_spec_verify_replay_update() const;
+  bool should_use_explicit_spec_verify_replay_update(
+      const ForwardInput& input) const;
   int64_t spec_verify_block_table_width(
       const torch::Tensor& block_tables) const;
   // Returns true when validation must use chunked-prefill to avoid the
@@ -175,7 +176,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
   bool device_target_context_ready_for_batch(const ForwardInput& input) const;
-  void drain_pending_draft_context();
   void flush_pending_target_context();
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
@@ -219,11 +219,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // not repeatedly traverse the model's virtual capability interface.
   SpeculativeVerifyCapabilities target_spec_verify_capabilities_;
 
-  // Immutable single-request draft row selectors. The steady workload
-  // alternates between the legal one-row (index 0) and two-row (index 1)
-  // layouts; keeping both indices on device avoids rebuilding/H2D each cycle.
-  torch::Tensor draft_selected_row_zero_;
-  torch::Tensor draft_selected_row_one_;
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input
   // update. The existing H2D preparation overlaps with the final draft, so no

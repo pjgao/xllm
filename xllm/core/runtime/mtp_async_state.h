@@ -34,8 +34,19 @@ struct NpuSpeculativeVerifyGraphLayout {
 // Model capabilities describe semantics only and remain independent of these
 // implementation limits.
 bool supports_npu_speculative_verify_graph_layout(
-    bool model_supports_in_graph_input_update,
     const NpuSpeculativeVerifyGraphLayout& layout);
+
+// Performance policy layered on top of the backend layout support. Keeping
+// this separate makes policy-disabled depths use the generic graph path even
+// when the update kernels can represent their layout correctly.
+bool should_use_npu_speculative_verify_graph_update(
+    bool model_supports_explicit_spec_verify_replay_update,
+    const NpuSpeculativeVerifyGraphLayout& layout);
+
+// Shared allocation/launch width for target verification block tables. The
+// extra entry covers the speculative token that can cross a block boundary.
+int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
+                                                int64_t block_size);
 
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
@@ -44,15 +55,6 @@ enum class CombinedDraftExecutionPath {
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type);
-
-// Extract one validation KV baseline per logical sequence. Decode validation
-// stores one row per speculative token, while chunked-prefill validation may
-// already store a single sequence-scoped value.
-torch::Tensor extract_base_kv_seq_lens(
-    const torch::Tensor& validate_kv_seq_lens,
-    int64_t batch_size,
-    int64_t num_validation_tokens,
-    int64_t num_speculative_tokens);
 
 // Materialize proposer-owned token columns into the row-major target verify
 // input. Graph replay normally performs this copy internally; eager fallback

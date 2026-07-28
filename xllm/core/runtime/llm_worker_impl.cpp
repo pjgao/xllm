@@ -141,15 +141,18 @@ bool LLMWorkerImpl::prepare_static_mtp_graph_tasks(
     int64_t num_accepted_tokens,
     int64_t spec_width,
     int64_t block_table_width,
+    int64_t spec_verify_max_kv_seq_len,
     const Stream& signal_stream) {
   if (model_executor_ == nullptr) {
     return false;
   }
-  return model_executor_->prepare_static_mtp_graph_tasks(linear_state_id,
-                                                         num_accepted_tokens,
-                                                         spec_width,
-                                                         block_table_width,
-                                                         signal_stream);
+  return model_executor_->prepare_static_mtp_graph_tasks(
+      linear_state_id,
+      num_accepted_tokens,
+      spec_width,
+      block_table_width,
+      spec_verify_max_kv_seq_len,
+      signal_stream);
 }
 #endif
 

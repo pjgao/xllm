@@ -138,8 +138,10 @@ class AclGraph {
   std::vector<int64_t> static_query_start_loc_;
   std::vector<int32_t> static_linear_state_ids_;
   std::vector<int64_t> static_num_accepted_tokens_;
-  bool has_internal_spec_verify_input_update_ = false;
-  std::vector<torch::Tensor> internal_spec_verify_input_sources_;
+  bool uses_explicit_spec_verify_replay_update_ = false;
+  std::vector<torch::Tensor> spec_verify_input_sources_at_capture_;
+  torch::Tensor graph_paged_attention_tiling_data_;
+  int64_t spec_verify_block_size_ = 0;
 };
 
 // Executor implementation using ACL graph optimization
@@ -173,6 +175,7 @@ class AclGraphExecutorImpl : public ExecutorImpl {
                                       int64_t num_accepted_tokens,
                                       int64_t spec_width,
                                       int64_t block_table_width,
+                                      int64_t spec_verify_max_kv_seq_len,
                                       const Stream& signal_stream) override;
 
   [[nodiscard]] int32_t graph_slot_count_for_test() const {
@@ -194,6 +197,9 @@ class AclGraphExecutorImpl : public ExecutorImpl {
     bool is_prepared = false;
   };
   std::array<GraphSlot, 2> graph_slots_;
+  absl::flat_hash_map<uint64_t, uint64_t> spec_verify_attention_plan_classes_;
+  std::vector<PagedAttentionPlanDescriptor>
+      spec_verify_attention_plan_descriptors_;
   std::mutex graph_slots_mutex_;
   int32_t graph_slot_count_ = 2;
   int32_t next_replay_slot_ = 0;
@@ -205,7 +211,10 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   uint32_t get_bucket_num_tokens(uint32_t num_tokens) const;
 
   uint64_t get_graph_key(uint32_t bucket_num_tokens,
-                         const ModelInputParams& params) const;
+                         const ModelInputParams& params,
+                         uint64_t attention_plan_class = 0) const;
+  std::optional<uint64_t> find_spec_verify_attention_plan_class(
+      uint64_t lookup_key);
 };
 REGISTER_EXECUTOR("npu", AclGraphExecutorImpl);
 }  // namespace xllm::npu

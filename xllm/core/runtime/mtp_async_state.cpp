@@ -22,8 +22,9 @@ limitations under the License.
 namespace xllm::mtp_async {
 namespace {
 
-constexpr int32_t kMinGraphUpdateSpeculativeTokens = 3;
-constexpr int32_t kMaxGraphUpdateSpeculativeTokens = 5;
+constexpr int32_t kMinSupportedGraphUpdateSpeculativeTokens = 3;
+constexpr int32_t kMaxSupportedGraphUpdateSpeculativeTokens = 5;
+constexpr int32_t kMaxOptimizedGraphUpdateSpeculativeTokens = 4;
 constexpr int32_t kGraphUpdateBlockSize = 128;
 constexpr int64_t kMaxGraphUpdateBlockTableWidth = (1 << 15) - 1;
 
@@ -46,15 +47,31 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 }  // namespace
 
 bool supports_npu_speculative_verify_graph_layout(
-    bool model_supports_in_graph_input_update,
     const NpuSpeculativeVerifyGraphLayout& layout) {
-  return model_supports_in_graph_input_update &&
-         layout.num_speculative_tokens >= kMinGraphUpdateSpeculativeTokens &&
-         layout.num_speculative_tokens <= kMaxGraphUpdateSpeculativeTokens &&
+  return layout.num_speculative_tokens >=
+             kMinSupportedGraphUpdateSpeculativeTokens &&
+         layout.num_speculative_tokens <=
+             kMaxSupportedGraphUpdateSpeculativeTokens &&
          layout.num_sequences == 1 &&
          layout.block_size == kGraphUpdateBlockSize &&
          layout.block_table_width > 0 &&
          layout.block_table_width <= kMaxGraphUpdateBlockTableWidth;
+}
+
+bool should_use_npu_speculative_verify_graph_update(
+    bool model_supports_explicit_spec_verify_replay_update,
+    const NpuSpeculativeVerifyGraphLayout& layout) {
+  return model_supports_explicit_spec_verify_replay_update &&
+         supports_npu_speculative_verify_graph_layout(layout) &&
+         layout.num_speculative_tokens <=
+             kMaxOptimizedGraphUpdateSpeculativeTokens;
+}
+
+int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
+                                                int64_t block_size) {
+  CHECK_GT(max_position_embeddings, 0);
+  CHECK_GT(block_size, 0);
+  return (max_position_embeddings + block_size - 1) / block_size + 1;
 }
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
@@ -63,30 +80,6 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
     return CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
   }
   return CombinedDraftExecutionPath::UNSUPPORTED;
-}
-
-torch::Tensor extract_base_kv_seq_lens(
-    const torch::Tensor& validate_kv_seq_lens,
-    int64_t batch_size,
-    int64_t num_validation_tokens,
-    int64_t num_speculative_tokens) {
-  CHECK(validate_kv_seq_lens.defined());
-  CHECK_GT(batch_size, 0);
-  CHECK_GT(num_validation_tokens, 0);
-  CHECK_GE(num_speculative_tokens, 0);
-
-  torch::Tensor flattened = validate_kv_seq_lens.flatten();
-  if (flattened.numel() == batch_size) {
-    // Chunked-prefill stores the post-validation sequence length once per
-    // sequence, so recover the length before the speculative suffix.
-    return flattened.contiguous() - num_speculative_tokens;
-  }
-  CHECK_EQ(flattened.numel(), batch_size * num_validation_tokens)
-      << "validation KV lengths must be sequence-scoped or row-major";
-  // Decode layout already stores the pre-token length in the first column.
-  return flattened.view({batch_size, num_validation_tokens})
-      .select(/*dim=*/1, /*index=*/0)
-      .contiguous();
 }
 
 torch::Tensor materialize_speculative_verify_tokens(

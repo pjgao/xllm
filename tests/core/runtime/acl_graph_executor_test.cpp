@@ -1197,14 +1197,11 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeWidth) {
   const torch::Tensor positions =
       torch::tensor({101, 102, 103, 104}, int_options);
 
-  const std::vector<torch::Tensor> sources =
-      persistent_param.capture_spec_verify_input_update(
-          params.graph.input_tokens_override,
-          positions,
-          params,
-          /*padded_num_tokens=*/kSpecWidth);
+  persistent_param.update_spec_verify_inputs(params.graph.input_tokens_override,
+                                             positions,
+                                             params,
+                                             /*padded_num_tokens=*/kSpecWidth);
 
-  EXPECT_EQ(sources.size(), 11);
   EXPECT_TRUE(torch::equal(persistent_param.persistent_tokens(kSpecWidth).cpu(),
                            params.graph.input_tokens_override.cpu()));
   EXPECT_TRUE(
