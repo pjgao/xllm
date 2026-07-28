@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace xllm::mtp_async {
 
@@ -38,6 +39,13 @@ torch::Tensor extract_base_kv_seq_lens(
     int64_t batch_size,
     int64_t num_validation_tokens,
     int64_t num_speculative_tokens);
+
+// Materialize proposer-owned token columns into the row-major target verify
+// input. Graph replay normally performs this copy internally; eager fallback
+// must use the same logical tokens before invoking the model.
+torch::Tensor materialize_speculative_verify_tokens(
+    const torch::Tensor& verify_tokens,
+    const std::vector<torch::Tensor>& draft_token_sources);
 
 // Device-resident state derived from target verification. base_positions and
 // base_kv_seq_lens point at the logical position immediately after the accepted

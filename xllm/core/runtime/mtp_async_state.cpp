@@ -59,16 +59,40 @@ torch::Tensor extract_base_kv_seq_lens(
   CHECK_GE(num_speculative_tokens, 0);
 
   torch::Tensor flattened = validate_kv_seq_lens.flatten();
-  torch::Tensor sequence_baselines;
   if (flattened.numel() == batch_size) {
-    sequence_baselines = flattened;
-  } else {
-    CHECK_EQ(flattened.numel(), batch_size * num_validation_tokens)
-        << "validation KV lengths must be sequence-scoped or row-major";
-    sequence_baselines = flattened.view({batch_size, num_validation_tokens})
-                             .select(/*dim=*/1, /*index=*/0);
+    // Chunked-prefill stores the post-validation sequence length once per
+    // sequence, so recover the length before the speculative suffix.
+    return flattened.contiguous() - num_speculative_tokens;
   }
-  return sequence_baselines.contiguous() - num_speculative_tokens;
+  CHECK_EQ(flattened.numel(), batch_size * num_validation_tokens)
+      << "validation KV lengths must be sequence-scoped or row-major";
+  // Decode layout already stores the pre-token length in the first column.
+  return flattened.view({batch_size, num_validation_tokens})
+      .select(/*dim=*/1, /*index=*/0)
+      .contiguous();
+}
+
+torch::Tensor materialize_speculative_verify_tokens(
+    const torch::Tensor& verify_tokens,
+    const std::vector<torch::Tensor>& draft_token_sources) {
+  if (draft_token_sources.empty()) {
+    return verify_tokens;
+  }
+  CHECK(verify_tokens.defined());
+  CHECK_EQ(verify_tokens.dim(), 1);
+  const int64_t verify_width =
+      static_cast<int64_t>(draft_token_sources.size()) + 1;
+  CHECK_EQ(verify_tokens.numel() % verify_width, 0);
+  const int64_t batch_size = verify_tokens.numel() / verify_width;
+  torch::Tensor verify_rows = verify_tokens.view({batch_size, verify_width});
+  for (size_t step = 0; step < draft_token_sources.size(); ++step) {
+    const torch::Tensor& source = draft_token_sources[step];
+    CHECK(source.defined());
+    CHECK_EQ(source.numel(), batch_size);
+    verify_rows.select(/*dim=*/1, static_cast<int64_t>(step) + 1)
+        .copy_(source.flatten(), /*non_blocking=*/true);
+  }
+  return verify_tokens;
 }
 
 AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,

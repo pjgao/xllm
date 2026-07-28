@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/kernels/ops_api.h"
 #include "core/platform/device.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
+#include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 #include "platform/npu/device_capture_lock.h"
 
@@ -150,21 +151,42 @@ bool same_tensor_sources(const std::vector<torch::Tensor>& captured,
     return false;
   }
   for (size_t i = 0; i < captured.size(); ++i) {
-    if (!captured[i].defined() || !current[i].defined() ||
+    const bool captured_defined = captured[i].defined();
+    const bool current_defined = current[i].defined();
+    if (!captured_defined || !current_defined ||
         captured[i].data_ptr() != current[i].data_ptr() ||
         captured[i].sizes() != current[i].sizes() ||
         captured[i].strides() != current[i].strides()) {
       LOG(ERROR) << "speculative verify input update source changed: index="
-                 << i << ", captured_ptr=" << captured[i].data_ptr()
-                 << ", current_ptr=" << current[i].data_ptr()
-                 << ", captured_sizes=" << captured[i].sizes()
-                 << ", current_sizes=" << current[i].sizes()
-                 << ", captured_strides=" << captured[i].strides()
-                 << ", current_strides=" << current[i].strides();
+                 << i << ", captured_defined=" << captured_defined
+                 << ", current_defined=" << current_defined;
+      if (captured_defined && current_defined) {
+        LOG(ERROR) << "captured_ptr=" << captured[i].data_ptr()
+                   << ", current_ptr=" << current[i].data_ptr()
+                   << ", captured_sizes=" << captured[i].sizes()
+                   << ", current_sizes=" << current[i].sizes()
+                   << ", captured_strides=" << captured[i].strides()
+                   << ", current_strides=" << current[i].strides();
+      }
       return false;
     }
   }
   return true;
+}
+
+ModelOutput forward_eager(CausalLM* model,
+                          const torch::Tensor& tokens,
+                          const torch::Tensor& positions,
+                          std::vector<KVCache>& kv_cache,
+                          const ModelInputParams& params) {
+  const torch::Tensor& verify_tokens =
+      params.graph.input_tokens_override.defined()
+          ? params.graph.input_tokens_override
+          : tokens;
+  torch::Tensor materialized_tokens =
+      mtp_async::materialize_speculative_verify_tokens(
+          verify_tokens, params.graph.spec_verify_draft_token_sources);
+  return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 
 }  // namespace
@@ -517,7 +539,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
           << "Falling back to eager speculative verification because graph "
              "input source storage moved after capture.";
       COUNTER_INC(num_model_execution_total_eager);
-      return model->forward(tokens, positions, kv_cache, params);
+      return forward_eager(model, tokens, positions, kv_cache, params);
     }
     if (persistent_param_.supports_fused_spec_verify_token_update(params)) {
       persistent_param_.run_fused_spec_verify_token_update(params);
@@ -692,7 +714,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in eager mode";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
   if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
     LOG_FIRST_N(WARNING, 1)
@@ -700,7 +722,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
            "chunked-prefill validate graph path is currently only adapted for "
            "hybrid linear attention models.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   if (in_decoding_phase &&
@@ -717,7 +739,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
           << params_single.parallel.dp_global_token_nums
           << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
-      return model_->forward(tokens, positions, kv_caches, params);
+      return forward_eager(model_, tokens, positions, kv_caches, params);
     }
 
     if (std::find(params_single.parallel.dp_is_decode.begin(),
@@ -731,7 +753,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
           << params_single.parallel.dp_global_token_nums
           << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
-      return model_->forward(tokens, positions, kv_caches, params);
+      return forward_eager(model_, tokens, positions, kv_caches, params);
     }
   }
 
@@ -765,7 +787,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "This message is logged only once. "
         << "Monitor counter 'num_model_execution_total_eager' for frequency.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
@@ -787,7 +809,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << max_seq_len << "). This message is logged only once. "
         << "Monitor counter 'num_model_execution_total_eager' for frequency.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
@@ -847,7 +869,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                << bucket_num_tokens << ": " << e.what()
                << ". Falling back to eager mode.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   if (capture_success) {
@@ -857,23 +879,26 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
     const bool static_mtp_variant =
         uses_static_mtp_graph_task_variant(params_single, bucket_num_tokens);
-    if (static_mtp_variant) {
-      while (active_slot.static_mtp_graph_keys.size() >=
-             kMaxStaticMtpGraphVariantsPerSlot) {
-        const uint64_t evicted_key = active_slot.static_mtp_graph_keys.front();
-        active_slot.static_mtp_graph_keys.pop_front();
-        active_slot.graphs.erase(evicted_key);
+    {
+      std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+      if (static_mtp_variant) {
+        while (active_slot.static_mtp_graph_keys.size() >=
+               kMaxStaticMtpGraphVariantsPerSlot) {
+          const uint64_t evicted_key =
+              active_slot.static_mtp_graph_keys.front();
+          active_slot.static_mtp_graph_keys.pop_front();
+          active_slot.graphs.erase(evicted_key);
+        }
+        active_slot.static_mtp_graph_keys.push_back(graph_key);
       }
-      active_slot.static_mtp_graph_keys.push_back(graph_key);
+      // shared_ptr keeps a replay/prepare that already left the map alive if a
+      // later capture evicts this static variant.
+      active_slot.graphs[graph_key] = graph;
     }
-    // Save the graph for future reuse. shared_ptr keeps a replay/prepare that
-    // already left the map alive if a later capture evicts this static variant.
-    active_slot.graphs[graph_key] = std::move(graph);
 
     // Return the output from capture (no need to replay since capture
     // already executed)
-    torch::Tensor hidden_states =
-        active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
+    torch::Tensor hidden_states = graph->get_hidden_states(n_tokens);
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
@@ -888,7 +913,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   LOG(ERROR) << "Failed to capture ACL graph for bucket num_tokens: "
              << bucket_num_tokens;
   COUNTER_INC(num_model_execution_total_eager);
-  return model_->forward(tokens, positions, kv_caches, params);
+  return forward_eager(model_, tokens, positions, kv_caches, params);
 }
 
 void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,

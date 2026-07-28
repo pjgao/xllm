@@ -71,7 +71,7 @@ TEST(MtpAsyncStateTest, RejectsUnsupportedGraphUpdateLayouts) {
 
 TEST(MtpAsyncStateTest, ExtractsEachSequencesRowMajorKvBaseline) {
   const torch::Tensor validate_kv_seq_lens = torch::tensor(
-      {{103, 104, 105, 106}, {203, 204, 205, 206}, {303, 304, 305, 306}},
+      {{100, 101, 102, 103}, {200, 201, 202, 203}, {300, 301, 302, 303}},
       torch::kInt);
 
   EXPECT_TRUE(
@@ -80,6 +80,30 @@ TEST(MtpAsyncStateTest, ExtractsEachSequencesRowMajorKvBaseline) {
                                             /*num_validation_tokens=*/4,
                                             /*num_speculative_tokens=*/3),
                    torch::tensor({100, 200, 300}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
+  torch::Tensor verify_tokens =
+      torch::tensor({10, -1, -1, 20, -1, -1}, torch::kInt);
+  const std::vector<torch::Tensor> draft_sources = {
+      torch::tensor({11, 21}, torch::kLong),
+      torch::tensor({12, 22}, torch::kLong)};
+
+  torch::Tensor materialized =
+      materialize_speculative_verify_tokens(verify_tokens, draft_sources);
+
+  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
+  EXPECT_TRUE(torch::equal(
+      materialized, torch::tensor({10, 11, 12, 20, 21, 22}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, LeavesOrdinaryEagerTokensUnchanged) {
+  const torch::Tensor verify_tokens = torch::tensor({10, 11}, torch::kInt);
+  torch::Tensor materialized =
+      materialize_speculative_verify_tokens(verify_tokens, {});
+
+  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
+  EXPECT_TRUE(torch::equal(materialized, verify_tokens));
 }
 
 TEST(MtpAsyncStateTest, PreservesSequenceScopedKvBaselineLayout) {
