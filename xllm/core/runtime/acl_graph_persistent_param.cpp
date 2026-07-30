@@ -636,37 +636,6 @@ void GraphPersistentParam::update_tokens(const torch::Tensor& tokens,
   }
 }
 
-bool GraphPersistentParam::supports_fused_spec_verify_metadata_update(
-    const ModelInputParams& params) const {
-  if (!use_mrope_ || !params.graph.spec_verify_source_addresses_stable ||
-      !params.graph.input_tokens_override.defined() || !params.is_spec_verify ||
-      !params.meta.batch_forward_type.is_chunked_prefill()) {
-    return false;
-  }
-
-  const int64_t spec_width = get_spec_verify_width(params);
-  if (params.graph.spec_verify_draft_token_sources.size() + 1 !=
-      static_cast<size_t>(spec_width)) {
-    return false;
-  }
-  const auto& attention = params.attention.device;
-  if (!attention.kv_seq_lens.defined() ||
-      !attention.new_cache_slots.defined() ||
-      !attention.block_tables.defined() || attention.block_tables.dim() != 2 ||
-      attention.kv_seq_lens.numel() < 1 ||
-      attention.new_cache_slots.numel() < spec_width ||
-      attention.block_tables.size(0) < 1 ||
-      !params.embedding.linear_state_indices.defined() ||
-      params.embedding.linear_state_indices.numel() < 1 ||
-      !params.num_accepted_tokens.defined() ||
-      params.num_accepted_tokens.numel() < 1) {
-    return false;
-  }
-
-  return kernel::npu::tilelang::has_spec_verify_metadata_update_specialization(
-      spec_width, attention.block_tables.size(1));
-}
-
 bool GraphPersistentParam::supports_fused_spec_verify_token_update(
     const ModelInputParams& params) const {
   if (!params.graph.spec_verify_source_addresses_stable ||
@@ -736,58 +705,8 @@ void GraphPersistentParam::update_spec_verify_inputs(
   CHECK_LE(block_table_len, persistent_block_tables_.size(1));
   CHECK_LE(expanded_block_table_len, persistent_expanded_block_tables_.size(1));
 
-  const bool fused_metadata_update =
-      supports_fused_spec_verify_metadata_update(params);
   const bool fused_token_update =
       supports_fused_spec_verify_token_update(params);
-  if (fused_metadata_update) {
-    std::vector<torch::Tensor> position_rows;
-    position_rows.reserve(3);
-    for (int64_t row = 0; row < 3; ++row) {
-      position_rows.emplace_back(persistent_positions_.select(0, row));
-    }
-    std::vector<torch::Tensor> expanded_block_rows;
-    constexpr int64_t kMaxFusedSpecWidth = 6;
-    CHECK_GE(persistent_expanded_block_tables_.size(0), kMaxFusedSpecWidth);
-    expanded_block_rows.reserve(kMaxFusedSpecWidth);
-    for (int64_t row = 0; row < kMaxFusedSpecWidth; ++row) {
-      expanded_block_rows.emplace_back(
-          persistent_expanded_block_tables_.select(0, row).narrow(
-              0, 0, block_table_len));
-    }
-    auto persistent_q_seq_lens = q_seq_lens_.narrow(0, 0, 1);
-    auto persistent_kv_seq_lens = kv_seq_lens_.narrow(0, 0, 1);
-    torch::Tensor persistent_new_cache_slots = persistent_new_cache_slots_;
-    auto persistent_block_table =
-        persistent_block_tables_.select(0, 0).narrow(0, 0, block_table_len);
-    auto persistent_linear_state_index =
-        persistent_linear_state_indices_.narrow(0, 0, 1);
-    auto persistent_num_accepted =
-        persistent_num_accepted_tokens_.narrow(0, 0, 1);
-    auto persistent_q_cu_seq_lens = q_cu_seq_lens_.narrow(0, 0, 2);
-    torch::Tensor persistent_expanded_kv_seq_lens = expanded_kv_seq_lens_;
-
-    kernel::npu::tilelang::spec_verify_metadata_update(
-        positions.narrow(0, 0, spec_width),
-        attention.kv_seq_lens.narrow(0, 0, 1),
-        attention.new_cache_slots.narrow(0, 0, spec_width),
-        attention.block_tables.select(0, 0).narrow(0, 0, block_table_len),
-        params.embedding.linear_state_indices.narrow(0, 0, 1),
-        params.num_accepted_tokens.narrow(0, 0, 1),
-        position_rows,
-        persistent_q_seq_lens,
-        persistent_kv_seq_lens,
-        persistent_new_cache_slots,
-        persistent_block_table,
-        persistent_linear_state_index,
-        persistent_num_accepted,
-        persistent_q_cu_seq_lens,
-        persistent_expanded_kv_seq_lens,
-        expanded_block_rows);
-
-    return;
-  }
-
   if (!fused_token_update) {
     persistent_tokens_.narrow(0, 0, spec_width).copy_(graph_tokens, true);
   }

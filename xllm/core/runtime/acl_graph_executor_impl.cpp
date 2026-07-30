@@ -180,20 +180,11 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
 std::vector<torch::Tensor> spec_verify_input_sources(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
-    const ModelInputParams& params,
-    bool fused_metadata_update) {
+    const ModelInputParams& params) {
   const torch::Tensor& graph_tokens =
       params.graph.input_tokens_override.defined()
           ? params.graph.input_tokens_override
           : tokens;
-  if (fused_metadata_update) {
-    return {positions,
-            params.attention.device.kv_seq_lens,
-            params.attention.device.new_cache_slots,
-            params.attention.device.block_tables,
-            params.embedding.linear_state_indices,
-            params.num_accepted_tokens};
-  }
   return {graph_tokens,
           positions,
           params.attention.device.q_seq_lens,
@@ -378,11 +369,8 @@ bool AclGraph::capture(CausalLM* model,
         can_use_explicit_spec_verify_replay_update &&
         graph_paged_attention_tiling_data_.defined();
     if (uses_explicit_spec_verify_replay_update_) {
-      spec_verify_input_sources_at_capture_ = spec_verify_input_sources(
-          tokens,
-          positions,
-          params,
-          persistent_param_.supports_fused_spec_verify_metadata_update(params));
+      spec_verify_input_sources_at_capture_ =
+          spec_verify_input_sources(tokens, positions, params);
     }
     // Execute forward pass - NPUGraph mempool manages temporary tensors
     auto forward_result =
@@ -614,11 +602,8 @@ ModelOutput AclGraph::replay(CausalLM* model,
       !needs_graph_metadata;
   std::optional<ModelInputParams> graph_params;
   if (uses_explicit_spec_verify_replay_update_) {
-    const auto current_sources = spec_verify_input_sources(
-        tokens,
-        positions,
-        params,
-        persistent_param_.supports_fused_spec_verify_metadata_update(params));
+    const auto current_sources =
+        spec_verify_input_sources(tokens, positions, params);
     if (!same_tensor_sources(spec_verify_input_sources_at_capture_,
                              current_sources)) {
       LOG_FIRST_N(ERROR, 1)
@@ -685,7 +670,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
       << "prepared static graph tasks do not match the replay signature";
   if (use_static_graph_tasks && !static_graph_tasks_prepared) {
     // Cold/fallback path: the final-draft pre-submit could not find this graph
-    // variant. Ring its ready event immediately before replay; steady MTP5
+    // variant. Ring its ready event immediately before replay; steady MTP3/4
     // cycles use the compute-stream pre-submit path instead.
     CHECK(update_stream_.has_value());
     signal_static_graph_tasks(update_stream_.value());
@@ -738,9 +723,9 @@ bool AclGraph::prepare_static_graph_tasks(
   if (!static_graph_task_signature_matches(params)) {
     return false;
   }
-  // The final draft graph has already been submitted to signal_stream. Queue
-  // each captured task-ready event behind it, so the target graph observes a
-  // fresh generation without a cross-stream credit/wait or host synchronize.
+  // Queue each captured task-ready event on the caller-provided compute
+  // stream. The target replay waits for this stream and observes a fresh
+  // generation without a host synchronize.
   signal_static_graph_tasks(signal_stream);
   return true;
 }

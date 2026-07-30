@@ -89,8 +89,6 @@ class GraphPersistentParam final {
                                  const ModelInputParams& params,
                                  uint32_t padded_num_tokens);
 
-  bool supports_fused_spec_verify_metadata_update(
-      const ModelInputParams& params) const;
   bool supports_fused_spec_verify_token_update(
       const ModelInputParams& params) const;
   void run_fused_spec_verify_token_update(const ModelInputParams& params);
