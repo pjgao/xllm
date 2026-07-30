@@ -924,9 +924,9 @@ struct GraphInput {
   // replay generations. This contract is algorithm-independent; individual
   // backends may still select model- or shape-specific fused implementations.
   bool spec_verify_source_addresses_stable = false;
-  // The static causal-conv task-ready event has already been queued behind
-  // the final draft's device event. Replay may consume it without issuing a
-  // host-side task update on the final-draft-to-target critical path.
+  // The static causal-conv task-ready event has already been queued on the
+  // compute stream. Replay may consume it without issuing a host-side task
+  // update on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
 
   GraphInput to(const torch::Device& device) const {

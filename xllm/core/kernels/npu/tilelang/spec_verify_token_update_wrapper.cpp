@@ -20,8 +20,8 @@ limitations under the License.
 #include <array>
 #include <cstdint>
 
-#include "dispatch_registry.h"
-#include "tilelang_ops_api.h"
+#include "core/kernels/npu/tilelang/dispatch_registry.h"
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 
 #ifndef XLLM_TL_SPEC_VERIFY_TOKEN_UPDATE_REGISTRY_INC
 #error "XLLM_TL_SPEC_VERIFY_TOKEN_UPDATE_REGISTRY_INC is not defined"
@@ -60,12 +60,16 @@ void spec_verify_token_update(const torch::Tensor& base_token,
       << available_spec_verify_token_update_variant_keys();
   for (const auto& token : draft_tokens) {
     check_token(token, torch::kInt64);
+    CHECK_EQ(token.device(), base_token.device())
+        << "all speculative verify tokens must be on the same NPU";
   }
   CHECK(persistent_tokens.defined() &&
         persistent_tokens.device().type() == c10::DeviceType::PrivateUse1);
   CHECK_EQ(persistent_tokens.scalar_type(), torch::kInt32);
   CHECK_GE(persistent_tokens.numel(), 8);
   CHECK(persistent_tokens.is_contiguous());
+  CHECK_EQ(persistent_tokens.device(), base_token.device())
+      << "persistent and source tokens must be on the same NPU";
 
   const auto specialization = make_spec_verify_token_update_specialization(
       SpecVerifyTokenUpdateSpecWidth{static_cast<int32_t>(spec_width)});

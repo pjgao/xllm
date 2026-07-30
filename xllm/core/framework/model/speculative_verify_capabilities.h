@@ -25,6 +25,7 @@ namespace xllm {
 struct SpeculativeVerifyCapabilities {
   bool requires_causal_chunked_prefill = false;
   bool supports_explicit_spec_verify_replay_update = false;
+  bool requires_npu_torch_backend = false;
 };
 
 }  // namespace xllm

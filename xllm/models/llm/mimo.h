@@ -88,7 +88,8 @@ class MiMoForCausalLMImpl final : public LlmForCausalLMImplBase<MiMoModel> {
     // but it does not expose the hybrid linear-state layout consumed by the
     // current NPU graph input updater.
     return {/*requires_causal_chunked_prefill=*/true,
-            /*supports_explicit_spec_verify_replay_update=*/false};
+            /*supports_explicit_spec_verify_replay_update=*/false,
+            /*requires_npu_torch_backend=*/false};
   }
 };
 TORCH_MODULE(MiMoForCausalLM);

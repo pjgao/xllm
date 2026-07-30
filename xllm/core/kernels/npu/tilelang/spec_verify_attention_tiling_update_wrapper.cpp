@@ -36,6 +36,8 @@ void spec_verify_attention_tiling_update(const torch::Tensor& src_kv_seq_lens,
                                          int64_t block_size) {
   CHECK_EQ(src_kv_seq_lens.device().type(), c10::DeviceType::PrivateUse1);
   CHECK_EQ(tiling_data.device().type(), c10::DeviceType::PrivateUse1);
+  CHECK_EQ(tiling_data.device(), src_kv_seq_lens.device())
+      << "attention tiling source and destination must be on the same NPU";
   CHECK_EQ(src_kv_seq_lens.scalar_type(), torch::kInt32);
   CHECK_EQ(tiling_data.scalar_type(), torch::kInt32);
   const int64_t spec_width = src_kv_seq_lens.numel();

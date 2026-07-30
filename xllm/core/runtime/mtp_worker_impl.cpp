@@ -575,6 +575,12 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 #endif
     }
   }
+#if defined(USE_NPU)
+  if (result && target_spec_verify_capabilities_.requires_npu_torch_backend) {
+    CHECK_EQ(::xllm::KernelConfig::get_instance().npu_kernel_backend(), "TORCH")
+        << "This MTP model only supports the NPU Torch backend";
+  }
+#endif
   return result;
 }
 
