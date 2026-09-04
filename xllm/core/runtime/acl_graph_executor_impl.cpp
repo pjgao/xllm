@@ -56,6 +56,7 @@ constexpr uint64_t kStaticGraphTaskHashSeed = 0x6a09e667f3bcc909ull;
 constexpr size_t kMaxStaticMtpGraphVariantsPerSlot = 16;
 constexpr uint64_t kMlaGraphKeyMask = 1ull << 62;
 constexpr uint64_t kMlaGraphKeyPayloadMask = (1ull << 62) - 1;
+constexpr uint64_t kEmptyDpGraphKeySalt = 0xd1b54a32d192ed03ull;
 bool uses_static_mtp_graph_task_variant(const ModelInputParams& params,
                                         uint32_t bucket_num_tokens,
                                         int64_t block_size) {
@@ -84,6 +85,12 @@ uint64_t mix_graph_key(uint64_t hash, uint64_t value) {
   value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
   value ^= value >> 31;
   return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
+}
+
+uint64_t add_empty_dp_graph_namespace(uint64_t graph_key,
+                                      bool is_empty_dp_shard) {
+  return is_empty_dp_shard ? mix_graph_key(graph_key, kEmptyDpGraphKeySalt)
+                           : graph_key;
 }
 
 constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
@@ -1204,9 +1211,20 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   std::shared_ptr<AclGraph> replay_graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
-    auto it = active_slot.graphs.find(graph_key);
-    if (it != active_slot.graphs.end()) {
-      replay_graph = it->second;
+    if (is_sparse_dp_graph_warmup(params_single)) {
+      // Sparse-DP warmup deliberately captures active and empty-shard graph
+      // variants in lockstep. Re-capture an existing active graph as well, so
+      // no peer replays a collective while another peer is capturing it.
+      active_slot.graphs.erase(graph_key);
+      auto& static_keys = active_slot.static_mtp_graph_keys;
+      static_keys.erase(
+          std::remove(static_keys.begin(), static_keys.end(), graph_key),
+          static_keys.end());
+    } else {
+      auto it = active_slot.graphs.find(graph_key);
+      if (it != active_slot.graphs.end()) {
+        replay_graph = it->second;
+      }
     }
   }
 
@@ -1481,6 +1499,7 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     uint32_t bucket_num_tokens,
     const ModelInputParams& params,
     uint64_t attention_plan_class) const {
+  const bool is_empty_dp_shard = params.meta.num_sequences == 0;
   if (params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill()) {
     const uint64_t q_max_seq_len =
@@ -1508,27 +1527,33 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
       const bool use_dynamic_fia_key =
           ::xllm::ExecutionConfig::get_instance().enable_fia_decode() &&
           is_qwen3_5_target_model_type(args_.model_type());
-      const uint64_t base_key = use_dynamic_fia_key
-                                    ? packed_key
-                                    : mix_graph_key(packed_key,
-                                                    attention_plan_class);
+      const uint64_t base_key =
+          use_dynamic_fia_key ? packed_key
+                              : mix_graph_key(packed_key, attention_plan_class);
       if (uses_static_mtp_graph_task_variant(
               params, bucket_num_tokens, options_.block_size())) {
         const auto signature = make_static_graph_task_signature(params);
         CHECK(signature.has_value());
-        return static_mtp_graph_task_key(base_key, signature.value());
+        return add_empty_dp_graph_namespace(
+            static_mtp_graph_task_key(base_key, signature.value()),
+            is_empty_dp_shard);
       }
-      return base_key;
+      return add_empty_dp_graph_namespace(base_key, is_empty_dp_shard);
     }
-    return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
-           (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
+    return add_empty_dp_graph_namespace(
+        static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
+            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift),
+        is_empty_dp_shard);
   }
   if (model_->supports_mla_graph_kv_bucketing()) {
     const int32_t capture_kv_seq_len_bucket =
         get_mla_capture_kv_seq_len_bucket(params, options_);
-    return get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket);
+    return add_empty_dp_graph_namespace(
+        get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket),
+        is_empty_dp_shard);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  return add_empty_dp_graph_namespace(static_cast<uint64_t>(bucket_num_tokens),
+                                      is_empty_dp_shard);
 }
 
 }  // namespace xllm::npu

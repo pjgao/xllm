@@ -19,6 +19,7 @@ limitations under the License.
 #include <acl/acl.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -85,6 +86,17 @@ inline StaticGraphTaskSignature make_static_graph_task_signature(
       .query_start_loc_begin = 0,
       .query_start_loc_end = signal.spec_width,
   };
+}
+
+inline bool is_sparse_dp_graph_warmup(const ModelInputParams& params) {
+  if (!params.meta.is_graph_warmup ||
+      params.parallel.dp_global_token_nums.size() <= 1) {
+    return false;
+  }
+  const auto [min_tokens, max_tokens] =
+      std::minmax_element(params.parallel.dp_global_token_nums.begin(),
+                          params.parallel.dp_global_token_nums.end());
+  return *min_tokens == 0 && *max_tokens > 0;
 }
 
 // ACL graph executor using libtorch NPUGraph for memory management

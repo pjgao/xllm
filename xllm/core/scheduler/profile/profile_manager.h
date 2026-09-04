@@ -200,7 +200,9 @@ class ProfileManager {
 
   double run_decode_request(const std::vector<int32_t>& total_length_vec);
 
-  double run_graph_decode_request(const std::vector<int32_t>& total_length_vec);
+  double run_graph_decode_request(
+      const std::vector<int32_t>& total_length_vec,
+      std::optional<int32_t> fixed_dp_rank = std::nullopt);
 
   static const std::vector<ProfileManager::CopyBlockProfile>&
   get_copy_block_profile();

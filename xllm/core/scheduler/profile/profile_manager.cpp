@@ -1125,8 +1125,13 @@ double ProfileManager::run_decode_request(
 }
 
 double ProfileManager::run_graph_decode_request(
-    const std::vector<int32_t>& total_length_vec) {
+    const std::vector<int32_t>& total_length_vec,
+    std::optional<int32_t> fixed_dp_rank) {
   CHECK_GT(options_.dp_size(), 0);
+  if (fixed_dp_rank.has_value()) {
+    CHECK_GE(fixed_dp_rank.value(), 0);
+    CHECK_LT(fixed_dp_rank.value(), options_.dp_size());
+  }
 
   std::vector<Sequence*> sequences;
   std::vector<size_t> sequences_budget;
@@ -1136,7 +1141,8 @@ double ProfileManager::run_graph_decode_request(
   requests.reserve(total_length_vec.size());
 
   for (size_t i = 0; i < total_length_vec.size(); ++i) {
-    int32_t dp_rank = static_cast<int32_t>(i % options_.dp_size());
+    int32_t dp_rank =
+        fixed_dp_rank.value_or(static_cast<int32_t>(i % options_.dp_size()));
     std::shared_ptr<Request> request = generate_single_decode_request(
         total_length_vec[i], dp_rank, /*is_graph_warmup=*/true);
     requests.emplace_back(request);
@@ -1314,8 +1320,13 @@ void ProfileManager::warmup_decode_for_graph() {
   const int32_t graph_slot_repetitions =
       ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
                                                                            : 1;
+  const bool warmup_sparse_dp_variants = options_.dp_size() > 1;
+  const int32_t sparse_capture_count =
+      warmup_sparse_dp_variants
+          ? graph_slot_repetitions * decode_bucket_count * options_.dp_size()
+          : 0;
   const int32_t total_capture_count =
-      graph_slot_repetitions * decode_bucket_count;
+      graph_slot_repetitions * decode_bucket_count + sparse_capture_count;
 
   LOG(INFO) << "Graph warmup started: bucket_count=" << decode_bucket_count
             << ", total_capture_count=" << total_capture_count
@@ -1351,6 +1362,32 @@ void ProfileManager::warmup_decode_for_graph() {
                 << ", sequence_batch=" << sequence_batch_size
                 << ", graph_slot_repeat=" << slot_repeat + 1 << "/"
                 << graph_slot_repetitions;
+    }
+
+    if (warmup_sparse_dp_variants) {
+      const int32_t local_batch_size = sequence_batch_size / options_.dp_size();
+      CHECK_GT(local_batch_size, 0);
+      std::vector<int32_t> sparse_total_length_vec(local_batch_size,
+                                                   decode_seq_len);
+      for (int32_t active_dp_rank = 0; active_dp_rank < options_.dp_size();
+           ++active_dp_rank) {
+        for (int32_t slot_repeat = 0; slot_repeat < graph_slot_repetitions;
+             ++slot_repeat) {
+          const double decode_latency =
+              run_graph_decode_request(sparse_total_length_vec, active_dp_rank);
+          decode_total_latency += decode_latency;
+          ++completed_captures;
+          LOG(INFO) << graph_warmup_progress(
+                           /*completed=*/completed_captures,
+                           /*total=*/total_capture_count,
+                           /*token_bucket=*/token_bucket,
+                           /*latency_ms=*/decode_latency)
+                    << ", sparse_dp_rank=" << active_dp_rank
+                    << ", local_sequence_batch=" << local_batch_size
+                    << ", graph_slot_repeat=" << slot_repeat + 1 << "/"
+                    << graph_slot_repetitions;
+        }
+      }
     }
   }
 

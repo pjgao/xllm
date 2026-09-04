@@ -1604,6 +1604,23 @@ TEST(SpeculativeWorkerDispatchTest, DecodeRequiresEveryDpRankToDecode) {
   EXPECT_FALSE(should_run_speculative_decode(params));
 }
 
+TEST(AclGraphWarmupTest, DetectsSparseDpGraphWarmupOnly) {
+  ModelInputParams params;
+  params.meta.is_graph_warmup = true;
+  params.parallel.dp_global_token_nums = {5, 0, 0, 0};
+  EXPECT_TRUE(npu::is_sparse_dp_graph_warmup(params));
+
+  params.meta.is_graph_warmup = false;
+  EXPECT_FALSE(npu::is_sparse_dp_graph_warmup(params));
+
+  params.meta.is_graph_warmup = true;
+  params.parallel.dp_global_token_nums = {5, 5, 5, 5};
+  EXPECT_FALSE(npu::is_sparse_dp_graph_warmup(params));
+
+  params.parallel.dp_global_token_nums = {0, 0, 0, 0};
+  EXPECT_FALSE(npu::is_sparse_dp_graph_warmup(params));
+}
+
 TEST(SpeculativeWorkerDispatchTest, PreservesSingleDpRankBehavior) {
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
