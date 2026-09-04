@@ -52,7 +52,11 @@ class ReplicaPool:
     def scores(self, now: float) -> list[float]:
         remaining = [
             [
-                max(0.0, self.service_time_seconds - (now - started))
+                (
+                    self.service_time_seconds - (now - started)
+                    if now - started < self.service_time_seconds
+                    else now - started
+                )
                 for started in active.values()
             ]
             for active in self.started_at
@@ -140,6 +144,8 @@ class ReplicaPool:
         started: float,
         status: int,
         queue_seconds: float,
+        stream_completed: bool,
+        error: str | None = None,
     ) -> None:
         async with self.condition:
             self.inflight[index] -= 1
@@ -153,9 +159,13 @@ class ReplicaPool:
                             "replica": index,
                             "inflight_at_acquire": inflight_at_acquire,
                             "scores_ms": [round(score * 1000.0, 3) for score in scores],
-                            "backend_ms": round((time.monotonic() - started) * 1000.0, 3),
+                            "backend_ms": round(
+                                (time.monotonic() - started) * 1000.0, 3
+                            ),
                             "queue_ms": round(queue_seconds * 1000.0, 3),
                             "status": status,
+                            "stream_completed": stream_completed,
+                            "error": error,
                         },
                         separators=(",", ":"),
                     )
@@ -190,6 +200,8 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     target = f"{backend}{request.rel_url}"
     status = 502
     released = False
+    stream_completed = False
+    error: str | None = None
     try:
         body = await request.read()
         async with session.request(
@@ -226,15 +238,18 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                         started,
                         status,
                         queue_seconds,
+                        stream_completed=True,
                     )
                     released = True
                 stream_tail = (stream_tail + chunk)[-32:]
             with suppress(ConnectionResetError):
                 await response.write_eof()
+            stream_completed = True
             return response
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        error = str(exc)
         raise web.HTTPBadGateway(text=f"xLLM replica {index} failed: {exc}") from exc
     finally:
         if not released:
@@ -246,13 +261,39 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 started,
                 status,
                 queue_seconds,
+                stream_completed,
+                error,
             )
 
 
 async def health(request: web.Request) -> web.Response:
     pool: ReplicaPool = request.app["pool"]
+    session: ClientSession = request.app["session"]
+
+    async def probe(backend: str) -> dict[str, str | int | bool]:
+        try:
+            async with session.get(
+                f"{backend}/health", timeout=ClientTimeout(total=2.0)
+            ) as response:
+                return {
+                    "backend": backend,
+                    "ready": 200 <= response.status < 300,
+                    "status": response.status,
+                }
+        except Exception as exc:
+            return {"backend": backend, "ready": False, "error": str(exc)}
+
+    backend_status = await asyncio.gather(
+        *(probe(backend) for backend in pool.backends)
+    )
+    ready = all(bool(status["ready"]) for status in backend_status)
     return web.json_response(
-        {"status": "ok", "backends": pool.backends, "inflight": pool.inflight}
+        {
+            "status": "ok" if ready else "unavailable",
+            "backends": backend_status,
+            "inflight": pool.inflight,
+        },
+        status=200 if ready else 503,
     )
 
 
