@@ -613,6 +613,53 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
       get_checkpoint_stride(conv_cache, ssm_cache);
   torch::Tensor linear_state_base_indices =
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
+
+  // The Qwen3.5 MTP checkpoint layout matches MegaGdnMtpDecode: conv state
+  // keeps T+2 rows and SSM state keeps T checkpoints per request slot.
+  const bool use_mega_gdn_mtp_decode =
+      use_spec_verify && fla_ssm_state_layout && conv_kernel_size_ == 4 &&
+      head_k_dim_ == 128 && head_v_dim_ == 128 &&
+      checkpoint_stride == seq_len && conv_cache.dim() == 3 &&
+      conv_cache.size(1) == seq_len + 2 &&
+      ssm_cache.size(0) == conv_cache.size(0) * seq_len;
+  if (use_mega_gdn_mtp_decode) {
+    auto state_indices = expand_sequence_tensor_to_batch(
+        logical_state_indices, batch_size, "linear_state_indices");
+    auto accepted_tokens = expand_sequence_tensor_to_batch(
+        input_params.num_accepted_tokens.to(device, torch::kInt32),
+        batch_size,
+        "num_accepted_tokens");
+    xllm::kernel::MegaGdnMtpDecodeParams params;
+    params.qkv = mixed_qkv.contiguous();
+    params.z = z.contiguous();
+    params.b = b.contiguous();
+    params.a = a.contiguous();
+    params.conv_weight = conv_weight.contiguous();
+    params.conv_state = conv_cache;
+    params.A_log = A_log_.contiguous();
+    params.dt_bias = dt_bias_.contiguous();
+    params.ssm_state = ssm_cache;
+    params.read_state_indices = state_indices;
+    params.write_state_indices = state_indices;
+    params.num_accepted_tokens = accepted_tokens;
+    params.norm_weight = norm_->weight().contiguous();
+    params.fla_ssm_state_layout = true;
+    auto norm_out = xllm::kernel::mega_gdn_mtp_decode(params);
+    LOG_FIRST_N(INFO, 1) << "Using MegaGdnMtpDecode for Qwen3.5 MTP verify";
+    auto rearranged_norm =
+        norm_out.reshape({norm_out.size(0) * norm_out.size(1),
+                          norm_out.size(2) * norm_out.size(3)});
+    rearranged_norm = reshape_qkvz_unpad(attn_metadata, rearranged_norm);
+    if (rearranged_norm.size(0) > original_num_tokens) {
+      rearranged_norm =
+          rearranged_norm.slice(0, 0, original_num_tokens).contiguous();
+    }
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+      return o_proj_->forward(rearranged_norm,
+                              row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+    }
+    return o_proj_->forward(rearranged_norm);
+  }
   auto graph_context = input_params.graph.acl_graph_task_update_context;
   const bool register_conv1d_graph_update =
       graph_context != nullptr && graph_context->capturing;
