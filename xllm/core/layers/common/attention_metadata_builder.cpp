@@ -306,6 +306,7 @@ AttentionMetadata build_attention_metadata(
 #endif
   attn_metadata.max_query_len = params.meta.q_max_seq_len;
   attn_metadata.max_seq_len = params.meta.kv_max_seq_len;
+  attn_metadata.is_dummy = (params.meta.q_max_seq_len == 0);
   if (!params.attention.host.kv_seq_lens.empty()) {
     const bool is_cu_seq_lens =
         params.attention.host.kv_seq_lens.size() ==
@@ -445,46 +446,66 @@ AttentionMetadata build_attention_metadata(
   }
   if (params.attention.device.q_seq_lens.defined()) {
     attn_metadata.q_seq_lens = params.attention.device.q_seq_lens;
-    torch::Tensor q_cu_seq_lens = params.attention.device.q_cu_seq_lens;
-    if (!q_cu_seq_lens.defined()) {
-      q_cu_seq_lens = torch::cumsum(attn_metadata.q_seq_lens, 0);
-    }
-    q_cu_seq_lens = q_cu_seq_lens.to(torch::kInt32);
-    const bool q_cu_has_leading_zero =
-        !params.attention.host.q_cu_seq_lens.empty() &&
-        params.attention.host.q_cu_seq_lens.front() == 0;
-    if (params.graph.tiling_data.defined() || q_cu_has_leading_zero) {
-      attn_metadata.q_cu_seq_lens = q_cu_seq_lens;
-    } else {
-      torch::Tensor zero = torch::zeros({1}, q_cu_seq_lens.options());
-      attn_metadata.q_cu_seq_lens = torch::cat({zero, q_cu_seq_lens}, 0);
+    if (!attn_metadata.is_dummy) {
+      torch::Tensor q_cu_seq_lens = params.attention.device.q_cu_seq_lens;
+      if (!q_cu_seq_lens.defined()) {
+        q_cu_seq_lens = torch::cumsum(attn_metadata.q_seq_lens, 0);
+      }
+      q_cu_seq_lens = q_cu_seq_lens.to(torch::kInt32);
+      const bool q_cu_has_leading_zero =
+          !params.attention.host.q_cu_seq_lens.empty() &&
+          params.attention.host.q_cu_seq_lens.front() == 0;
+      if (params.graph.tiling_data.defined() || q_cu_has_leading_zero) {
+        attn_metadata.q_cu_seq_lens = q_cu_seq_lens;
+      } else {
+        torch::Tensor zero = torch::zeros({1}, q_cu_seq_lens.options());
+        attn_metadata.q_cu_seq_lens = torch::cat({zero, q_cu_seq_lens}, 0);
+      }
     }
   }
 #endif
 
-  attn_metadata.is_dummy = (params.meta.q_max_seq_len == 0);
   if (attn_metadata.is_dummy) {
-    torch::TensorOptions options =
-        int32_options_like(params.attention.device.new_cache_slots,
-                           params.attention.device.q_seq_lens);
-    if (!params.attention.device.new_cache_slots.defined() &&
-        !params.attention.device.q_seq_lens.defined()) {
-      CHECK(device.has_value())
-          << "dummy attention requires device when new_cache_slots is "
-             "undefined";
-      options = options.device(device.value());
+#if defined(USE_NPU)
+    // GraphPersistentParam has already replaced empty-DP metadata with stable
+    // device buffers. Reuse those addresses during lazy graph capture: making
+    // torch::tensor host constants on the captured stream triggers a
+    // synchronous H2D copy, which CANN rejects.
+    const bool reuse_graph_dummy_metadata =
+        params.enable_graph && attn_metadata.slot_mapping.defined() &&
+        attn_metadata.q_seq_lens.defined() &&
+        attn_metadata.kv_seq_lens.defined() &&
+        attn_metadata.block_table.defined();
+    if (reuse_graph_dummy_metadata) {
+      attn_metadata.paged_kv_indptr = attn_metadata.q_cu_seq_lens;
+      attn_metadata.paged_kv_indices = attn_metadata.slot_mapping;
+      attn_metadata.paged_kv_last_page_len = attn_metadata.kv_seq_lens;
+    } else {
+#endif
+      torch::TensorOptions options =
+          int32_options_like(params.attention.device.new_cache_slots,
+                             params.attention.device.q_seq_lens);
+      if (!params.attention.device.new_cache_slots.defined() &&
+          !params.attention.device.q_seq_lens.defined()) {
+        CHECK(device.has_value())
+            << "dummy attention requires device when new_cache_slots is "
+               "undefined";
+        options = options.device(device.value());
+      }
+      attn_metadata.slot_mapping = torch::tensor({0}, options);
+      attn_metadata.q_cu_seq_lens = torch::tensor({0, 1}, options);
+      attn_metadata.kv_cu_seq_lens = torch::tensor({0, 1}, options);
+      attn_metadata.q_seq_lens = torch::tensor({1}, options);
+      attn_metadata.kv_seq_lens = torch::tensor({1}, options);
+      attn_metadata.q_seq_lens_vec = {0, 1};
+      attn_metadata.kv_seq_lens_vec = {0, 1};
+      attn_metadata.paged_kv_indptr = torch::tensor({0, 1}, options);
+      attn_metadata.paged_kv_indices = torch::tensor({0}, options);
+      attn_metadata.paged_kv_last_page_len = torch::tensor({1}, options);
+      attn_metadata.block_table = torch::zeros({1, 1}, options);
+#if defined(USE_NPU)
     }
-    attn_metadata.slot_mapping = torch::tensor({0}, options);
-    attn_metadata.q_cu_seq_lens = torch::tensor({0, 1}, options);
-    attn_metadata.kv_cu_seq_lens = torch::tensor({0, 1}, options);
-    attn_metadata.q_seq_lens = torch::tensor({1}, options);
-    attn_metadata.kv_seq_lens = torch::tensor({1}, options);
-    attn_metadata.q_seq_lens_vec = {0, 1};
-    attn_metadata.kv_seq_lens_vec = {0, 1};
-    attn_metadata.paged_kv_indptr = torch::tensor({0, 1}, options);
-    attn_metadata.paged_kv_indices = torch::tensor({0}, options);
-    attn_metadata.paged_kv_last_page_len = torch::tensor({1}, options);
-    attn_metadata.block_table = torch::zeros({1, 1}, options);
+#endif
     attn_metadata.max_query_len = 1;
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);
     attn_metadata.total_kv_len = 1;

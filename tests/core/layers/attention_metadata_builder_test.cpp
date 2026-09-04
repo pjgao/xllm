@@ -154,6 +154,41 @@ TEST(AttentionMetadataBuilderTest, MaterializesColdMaskForDummyShard) {
       torch::equal(metadata.has_initial_states, torch::tensor({false})));
 }
 
+#if defined(USE_NPU)
+TEST(AttentionMetadataBuilderTest,
+     GraphDummyShardReusesPersistentDeviceMetadata) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 4;
+  params.meta.q_max_seq_len = 0;
+  params.meta.kv_max_seq_len = 16;
+  params.enable_graph = true;
+
+  const torch::TensorOptions options =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+  params.attention.device.new_cache_slots = torch::zeros({5}, options);
+  params.attention.device.q_seq_lens = torch::ones({4}, options);
+  params.attention.device.kv_seq_lens = torch::ones({4}, options);
+  params.attention.device.block_tables = torch::zeros({4, 2}, options);
+
+  AttentionMetadata metadata =
+      AttentionMetadataBuilder::build(params,
+                                      /*enable_mla=*/false,
+                                      /*attn_mask=*/{},
+                                      torch::Device(torch::kCPU));
+
+  ASSERT_TRUE(metadata.is_dummy);
+  EXPECT_EQ(metadata.slot_mapping.data_ptr(),
+            params.attention.device.new_cache_slots.data_ptr());
+  EXPECT_EQ(metadata.q_seq_lens.data_ptr(),
+            params.attention.device.q_seq_lens.data_ptr());
+  EXPECT_EQ(metadata.kv_seq_lens.data_ptr(),
+            params.attention.device.kv_seq_lens.data_ptr());
+  EXPECT_EQ(metadata.block_table.data_ptr(),
+            params.attention.device.block_tables.data_ptr());
+}
+#endif
+
 #if defined(USE_MUSA)
 TEST(AttentionMetadataBuilderTest, BuildsMusaMetadataWithCommonBuilder) {
   ModelInputParams params;
