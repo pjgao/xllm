@@ -384,13 +384,6 @@ void validate_config(const std::string& model_type) {
 #endif
 
 #if defined(USE_NPU)
-  if (speculative_config.num_speculative_tokens() > 0 &&
-      execution_config.enable_graph_double_buffer()) {
-    LOG(WARNING) << "enable_graph_double_buffer is not compatible with "
-                    "speculative decoding. "
-                 << "Disabling enable_graph_double_buffer.";
-    execution_config.enable_graph_double_buffer(false);
-  }
   // enable_xtensor / enable_rolling_load imply enable_manual_loader
   if ((kv_cache_config.enable_xtensor() || load_config.enable_rolling_load()) &&
       !load_config.enable_manual_loader()) {

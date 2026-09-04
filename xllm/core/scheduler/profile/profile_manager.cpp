@@ -45,6 +45,24 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+std::vector<int32_t> build_step_time_profile_batch_sizes(
+    int32_t max_seqs_per_batch) {
+  CHECK_GT(max_seqs_per_batch, 0);
+  constexpr int32_t kLegacyMaxProfileBatchSize = 23;
+  const int32_t max_profile_batch_size =
+      std::min(max_seqs_per_batch, kLegacyMaxProfileBatchSize);
+  std::vector<int32_t> batch_sizes;
+  for (int32_t batch_size = 1; batch_size <= max_profile_batch_size;
+       batch_size += 2) {
+    batch_sizes.push_back(batch_size);
+  }
+  if (batch_sizes.back() != max_profile_batch_size) {
+    batch_sizes.push_back(max_profile_batch_size);
+  }
+  return batch_sizes;
+}
+
 namespace {
 
 int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
@@ -412,12 +430,12 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
   // decode time profile
 
   std::vector<std::tuple<int32_t, int32_t, double>> time_profiling_data;
-  int32_t max_batch_size = 25;
   // for (int32_t token_length = profile_max_prompt_length; token_length >
   // 1;token_length >>= 1)
   for (int32_t token_length = 2; token_length < profile_max_prompt_length;
        token_length += profile_length_step_) {
-    for (int32_t batch_size = 1; batch_size < max_batch_size; batch_size += 2) {
+    for (int32_t batch_size :
+         build_step_time_profile_batch_sizes(options_.max_seqs_per_batch())) {
       double latency_mean = 0;
       for (int32_t k = 0; k < profile_count_per_step_; k++) {
         latency_mean += run_request(token_length, token_length - 1, batch_size);
@@ -1274,6 +1292,10 @@ void ProfileManager::warmup_decode_for_graph() {
   max_decode_batch_size = decode_warmup_global_batch_ceiling(
       max_decode_batch_size, options_.dp_size());
   int32_t decode_seq_len = std::min(16, max_context_len);
+  if (Platform::is_npu() &&
+      ::xllm::ExecutionConfig::get_instance().enable_fia_decode()) {
+    decode_seq_len = std::min(2048, max_context_len);
+  }
 
   const int32_t allocatable_sequences =
       measure_graph_decode_capacity(max_decode_batch_size, decode_seq_len);
@@ -1287,8 +1309,17 @@ void ProfileManager::warmup_decode_for_graph() {
       decode_graph_warmup_plan_.batch_sizes;
   const int32_t decode_bucket_count =
       static_cast<int32_t>(decode_batch_sizes.size());
+  // Each graph slot owns a separate graph map. Warm every shape once per slot
+  // so the first serving requests do not compile the second-buffer variants.
+  const int32_t graph_slot_repetitions =
+      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
+                                                                           : 1;
+  const int32_t total_capture_count =
+      graph_slot_repetitions * decode_bucket_count;
 
   LOG(INFO) << "Graph warmup started: bucket_count=" << decode_bucket_count
+            << ", total_capture_count=" << total_capture_count
+            << ", graph_slot_repetitions=" << graph_slot_repetitions
             << ", configured_max_batch_size=" << max_decode_batch_size
             << ", allocatable_sequences=" << allocatable_sequences
             << ", decode_seq_len=" << decode_seq_len;
@@ -1299,6 +1330,7 @@ void ProfileManager::warmup_decode_for_graph() {
   // fresh scratch (the freed smaller blocks cannot satisfy it), which makes the
   // pool grow linearly with the bucket count.
   double decode_total_latency = 0.0;
+  int32_t completed_captures = 0;
   for (int32_t bucket_index = decode_bucket_count - 1; bucket_index >= 0;
        --bucket_index) {
     const int32_t sequence_batch_size =
@@ -1306,14 +1338,20 @@ void ProfileManager::warmup_decode_for_graph() {
     const int32_t token_bucket = decode_warmup_token_bucket(
         decode_graph_warmup_plan_, sequence_batch_size, options_.dp_size());
     std::vector<int32_t> total_length_vec(sequence_batch_size, decode_seq_len);
-    const double decode_latency = run_graph_decode_request(total_length_vec);
-    decode_total_latency += decode_latency;
-    LOG(INFO) << graph_warmup_progress(
-                     /*completed=*/decode_bucket_count - bucket_index,
-                     /*total=*/decode_bucket_count,
-                     /*token_bucket=*/token_bucket,
-                     /*latency_ms=*/decode_latency)
-              << ", sequence_batch=" << sequence_batch_size;
+    for (int32_t slot_repeat = 0; slot_repeat < graph_slot_repetitions;
+         ++slot_repeat) {
+      const double decode_latency = run_graph_decode_request(total_length_vec);
+      decode_total_latency += decode_latency;
+      ++completed_captures;
+      LOG(INFO) << graph_warmup_progress(
+                       /*completed=*/completed_captures,
+                       /*total=*/total_capture_count,
+                       /*token_bucket=*/token_bucket,
+                       /*latency_ms=*/decode_latency)
+                << ", sequence_batch=" << sequence_batch_size
+                << ", graph_slot_repeat=" << slot_repeat + 1 << "/"
+                << graph_slot_repetitions;
+    }
   }
 
   const int32_t max_sequence_batch_size =
