@@ -60,6 +60,7 @@ cc_test(
   DEPS
     torch
     kernels
+    unified_dlog
     GTest::gtest_main
 )
 
