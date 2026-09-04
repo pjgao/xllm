@@ -892,15 +892,24 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     }
   }
   const int32_t q_max_seq_len = std::max<int32_t>(params.meta.q_max_seq_len, 1);
-  const int64_t padded_batch_size =
-      is_chunked_prefill
-          ? (padded_num_tokens + q_max_seq_len - 1) / q_max_seq_len
-          : padded_num_tokens;
   const bool is_empty_dp_decode_rank =
       is_decode && params.meta.num_sequences == 0 && actual_num_tokens > 0 &&
       params.parallel.dp_global_token_nums.size() > 1 &&
       params.attention.host.kv_seq_lens.empty() &&
       params.attention.host.q_seq_lens.empty();
+  // The hybrid target carries MTP proposals as token rows but its graph
+  // metadata remains sequence-scoped. Empty DP ranks have no host lengths
+  // from which to recover that sequence count, so derive it from the target
+  // decode width instead of treating every proposal token as one sequence.
+  const bool use_hybrid_empty_dp_sequence_rows =
+      is_empty_dp_decode_rank && is_hybrid_linear_attention_;
+  const int64_t metadata_rows_per_sequence =
+      use_hybrid_empty_dp_sequence_rows ? decode_tokens : q_max_seq_len;
+  const int64_t padded_batch_size =
+      (is_chunked_prefill || use_hybrid_empty_dp_sequence_rows)
+          ? (padded_num_tokens + metadata_rows_per_sequence - 1) /
+                metadata_rows_per_sequence
+          : padded_num_tokens;
   const int64_t actual_seq_len_rows =
       is_empty_dp_decode_rank
           ? 0

@@ -1919,9 +1919,9 @@ TEST(AclGraphPersistentParamTest,
       .max_position_embeddings(16)
       .head_dim(0);
   runtime::Options options;
-  options.max_tokens_per_batch(16)
+  options.max_tokens_per_batch(40)
       .max_seqs_per_batch(8)
-      .num_decoding_tokens(1)
+      .num_decoding_tokens(5)
       .block_size(4)
       .dp_size(4);
   const torch::Device device(torch::kCPU);
@@ -1929,12 +1929,13 @@ TEST(AclGraphPersistentParamTest,
       args,
       device,
       options,
-      /*need_update_attn_mask=*/true);
+      /*need_update_attn_mask=*/true,
+      /*is_hybrid_linear_attention=*/true);
 
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
   params.meta.num_sequences = 0;
-  params.parallel.dp_global_token_nums = {1, 0, 0, 0};
+  params.parallel.dp_global_token_nums = {20, 0, 0, 0};
   params.parallel.dp_global_kv_max_seq_lens = {16, 0, 0, 0};
   torch::Tensor dummy_token = torch::tensor({1}, torch::kInt);
   torch::Tensor dummy_position = torch::tensor({0}, torch::kInt);
@@ -1946,17 +1947,24 @@ TEST(AclGraphPersistentParamTest,
                       torch::Tensor(),
                       dummy_position,
                       params,
-                      /*padded_num_tokens=*/5,
+                      /*padded_num_tokens=*/20,
                       /*return_capture_params=*/true));
   ASSERT_TRUE(capture_params.has_value());
   ASSERT_TRUE(capture_params->graph.attn_mask.defined());
-  EXPECT_EQ(capture_params->graph.attn_mask.sizes(),
-            std::vector<int64_t>({5, 16}));
+  EXPECT_GE(capture_params->graph.attn_mask.size(0), 4);
+  EXPECT_EQ(capture_params->graph.attn_mask.size(1), 16);
+  EXPECT_EQ(capture_params->meta.num_sequences, 4);
+  EXPECT_EQ(capture_params->attention.device.q_seq_lens.size(0), 4);
+  EXPECT_EQ(capture_params->attention.device.kv_seq_lens.size(0), 4);
+  EXPECT_EQ(capture_params->attention.device.block_tables.size(0), 4);
   EXPECT_TRUE(torch::equal(
-      capture_params->graph.attn_mask.select(/*dim=*/1, /*index=*/0),
-      torch::zeros({5}, torch::kFloat32)));
+      capture_params->graph.attn_mask
+          .slice(/*dim=*/0, /*start=*/0, /*end=*/4)
+          .select(/*dim=*/1, /*index=*/0),
+      torch::zeros({4}, torch::kFloat32)));
   EXPECT_TRUE(torch::all(
                   capture_params->graph.attn_mask
+                      .slice(/*dim=*/0, /*start=*/0, /*end=*/4)
                       .slice(/*dim=*/1, /*start=*/1, /*end=*/16)
                       .lt(0))
                   .item<bool>());
