@@ -260,6 +260,8 @@ std::pair<torch::Tensor, torch::Tensor> mega_chunk_gdn(
 
 torch::Tensor mega_gdn_mtp_decode(MegaGdnMtpDecodeParams& params);
 
+bool supports_mega_gdn_mtp_decode(const MegaGdnMtpDecodeParams& params);
+
 torch::Tensor recurrent_gated_delta_rule(
     const torch::Tensor& query,
     const torch::Tensor& key,

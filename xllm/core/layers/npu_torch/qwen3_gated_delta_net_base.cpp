@@ -614,36 +614,42 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   torch::Tensor linear_state_base_indices =
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
 
-  // The Qwen3.5 MTP checkpoint layout matches MegaGdnMtpDecode: conv state
-  // keeps T+2 rows and SSM state keeps T checkpoints per request slot.
-  const bool use_mega_gdn_mtp_decode =
-      use_spec_verify && fla_ssm_state_layout && conv_kernel_size_ == 4 &&
-      head_k_dim_ == 128 && head_v_dim_ == 128 &&
-      checkpoint_stride == seq_len && conv_cache.dim() == 3 &&
-      conv_cache.size(1) == seq_len + 2 &&
-      ssm_cache.size(0) == conv_cache.size(0) * seq_len;
-  if (use_mega_gdn_mtp_decode) {
-    auto state_indices = expand_sequence_tensor_to_batch(
+  xllm::kernel::MegaGdnMtpDecodeParams params;
+  if (use_spec_verify && input_params.num_accepted_tokens.defined()) {
+    params.qkv = mixed_qkv;
+    params.z = z;
+    params.b = b;
+    params.a = a;
+    params.conv_weight = conv_weight;
+    params.conv_state = conv_cache;
+    params.A_log = A_log_;
+    params.dt_bias = dt_bias_;
+    params.ssm_state = ssm_cache;
+    params.read_state_indices = expand_sequence_tensor_to_batch(
         logical_state_indices, batch_size, "linear_state_indices");
-    auto accepted_tokens = expand_sequence_tensor_to_batch(
+    params.write_state_indices = params.read_state_indices;
+    params.num_accepted_tokens = expand_sequence_tensor_to_batch(
         input_params.num_accepted_tokens.to(device, torch::kInt32),
         batch_size,
         "num_accepted_tokens");
-    xllm::kernel::MegaGdnMtpDecodeParams params;
-    params.qkv = mixed_qkv.contiguous();
-    params.z = z.contiguous();
-    params.b = b.contiguous();
-    params.a = a.contiguous();
-    params.conv_weight = conv_weight.contiguous();
-    params.conv_state = conv_cache;
-    params.A_log = A_log_.contiguous();
-    params.dt_bias = dt_bias_.contiguous();
-    params.ssm_state = ssm_cache;
-    params.read_state_indices = state_indices;
-    params.write_state_indices = state_indices;
-    params.num_accepted_tokens = accepted_tokens;
-    params.norm_weight = norm_->weight().contiguous();
-    params.fla_ssm_state_layout = true;
+    params.norm_weight = norm_->weight();
+    params.fla_ssm_state_layout = fla_ssm_state_layout;
+  }
+  // Select the fused operator before it can mutate cache state. Unsupported
+  // shapes retain the existing causal-conv and recurrent-GDN implementation.
+  const bool use_mega_gdn_mtp_decode =
+      conv_kernel_size_ == 4 && head_k_dim_ == 128 && head_v_dim_ == 128 &&
+      checkpoint_stride == seq_len &&
+      xllm::kernel::supports_mega_gdn_mtp_decode(params);
+  if (use_mega_gdn_mtp_decode) {
+    params.qkv = params.qkv.contiguous();
+    params.z = params.z.contiguous();
+    params.b = params.b.contiguous();
+    params.a = params.a.contiguous();
+    params.conv_weight = params.conv_weight.contiguous();
+    params.A_log = params.A_log.contiguous();
+    params.dt_bias = params.dt_bias.contiguous();
+    params.norm_weight = params.norm_weight.contiguous();
     auto norm_out = xllm::kernel::mega_gdn_mtp_decode(params);
     LOG_FIRST_N(INFO, 1) << "Using MegaGdnMtpDecode for Qwen3.5 MTP verify";
     auto rearranged_norm =
