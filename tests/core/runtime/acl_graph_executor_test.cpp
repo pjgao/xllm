@@ -1893,6 +1893,58 @@ TEST(AclGraphPersistentParamTest, DecodePadsEachDpRankEplbMaskIndependently) {
                     torch::kBool)));
 }
 
+TEST(AclGraphPersistentParamTest,
+     EmptyDpDecodeBuildsAttentionMaskFromPersistentPadding) {
+  ModelArgs args;
+  args.model_type("qwen3_5_moe_text")
+      .dtype("float32")
+      .hidden_size(4)
+      .max_position_embeddings(16)
+      .head_dim(0);
+  runtime::Options options;
+  options.max_tokens_per_batch(16)
+      .max_seqs_per_batch(8)
+      .num_decoding_tokens(1)
+      .block_size(4)
+      .dp_size(4);
+  const torch::Device device(torch::kCPU);
+  npu::GraphPersistentParam persistent_params(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/true);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 0;
+  params.parallel.dp_global_token_nums = {1, 0, 0, 0};
+  params.parallel.dp_global_kv_max_seq_lens = {16, 0, 0, 0};
+  torch::Tensor dummy_token = torch::tensor({1}, torch::kInt);
+  torch::Tensor dummy_position = torch::tensor({0}, torch::kInt);
+
+  std::optional<ModelInputParams> capture_params;
+  EXPECT_NO_THROW(capture_params = persistent_params.update(
+                      dummy_token,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      dummy_position,
+                      params,
+                      /*padded_num_tokens=*/5,
+                      /*return_capture_params=*/true));
+  ASSERT_TRUE(capture_params.has_value());
+  ASSERT_TRUE(capture_params->graph.attn_mask.defined());
+  EXPECT_EQ(capture_params->graph.attn_mask.sizes(),
+            std::vector<int64_t>({5, 16}));
+  EXPECT_TRUE(torch::equal(
+      capture_params->graph.attn_mask.select(/*dim=*/1, /*index=*/0),
+      torch::zeros({5}, torch::kFloat32)));
+  EXPECT_TRUE(torch::all(
+                  capture_params->graph.attn_mask
+                      .slice(/*dim=*/1, /*start=*/1, /*end=*/16)
+                      .lt(0))
+                  .item<bool>());
+}
+
 TEST_F(AclGraphExecutorTest, GraphExecutorUsesFirstFullAttentionKvCache) {
   auto batch = CreateTestBatch();
   ASSERT_FALSE(batch->empty());

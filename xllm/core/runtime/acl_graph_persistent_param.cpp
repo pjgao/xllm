@@ -1165,7 +1165,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   const bool skip_unused_expanded_verify_mask =
       can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
   if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
-    update_attention_mask(params);
+    update_attention_mask(
+        params, is_empty_dp_decode_rank ? padded_batch_size : 0);
   }
 
   std::vector<int32_t> padded_kv_seq_lens_vec(
@@ -1923,12 +1924,24 @@ void GraphPersistentParam::plan_paged_attention_tiling(
 }
 
 void GraphPersistentParam::update_attention_mask(
-    const ModelInputParams& input_params) {
+    const ModelInputParams& input_params,
+    int64_t empty_dp_padded_batch_size) {
   // update persistent_mask_ in-place
-  const int64_t batch_size = input_params.attention.device.kv_seq_lens.size(0);
-  const int64_t max_seq_len = input_params.meta.kv_max_seq_len > 0
-                                  ? input_params.meta.kv_max_seq_len
-                                  : args_.max_position_embeddings();
+  const bool is_empty_dp_decode_rank = empty_dp_padded_batch_size > 0;
+  const int64_t batch_size =
+      is_empty_dp_decode_rank
+          ? empty_dp_padded_batch_size
+          : input_params.attention.device.kv_seq_lens.size(0);
+  int64_t max_seq_len = input_params.meta.kv_max_seq_len;
+  if (is_empty_dp_decode_rank &&
+      !input_params.parallel.dp_global_kv_max_seq_lens.empty()) {
+    max_seq_len = std::max<int64_t>(
+        max_seq_len,
+        util::max(input_params.parallel.dp_global_kv_max_seq_lens));
+  }
+  if (max_seq_len <= 0) {
+    max_seq_len = args_.max_position_embeddings();
+  }
 
   // persistent_mask_ is already initialized in constructor
   // Check if size is sufficient
@@ -2026,10 +2039,15 @@ void GraphPersistentParam::update_attention_mask(
                          .unsqueeze(0)
                          .expand({batch_size, max_seq_len});
 
-    auto context_lens_expanded =
-        input_params.attention.device.kv_seq_lens.to(torch::kInt32)
-            .unsqueeze(1)
-            .expand({batch_size, max_seq_len});
+    const torch::Tensor context_lens =
+        is_empty_dp_decode_rank
+            ? kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/batch_size)
+            : input_params.attention.device.kv_seq_lens;
+    CHECK(context_lens.defined())
+        << "decode attention mask requires kv_seq_lens";
+    auto context_lens_expanded = context_lens.to(torch::kInt32)
+                                     .unsqueeze(1)
+                                     .expand({batch_size, max_seq_len});
 
     auto mask_condition = positions >= context_lens_expanded;
     auto zero_slice = persistent_mask_zero_template_

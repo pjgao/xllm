@@ -247,7 +247,8 @@ class GraphPersistentParam final {
   void initialize_paged_attention_plan_context(const torch::Device& device);
 
   // Update attention mask efficiently from input parameters
-  void update_attention_mask(const ModelInputParams& input_params);
+  void update_attention_mask(const ModelInputParams& input_params,
+                             int64_t empty_dp_padded_batch_size = 0);
 
   void update_eplb_decode_token_mask(const ModelInputParams& input_params,
                                      uint32_t padded_num_tokens);
