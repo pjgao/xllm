@@ -1215,7 +1215,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
       // Sparse-DP warmup deliberately captures active and empty-shard graph
       // variants in lockstep. Re-capture an existing active graph as well, so
       // no peer replays a collective while another peer is capturing it.
-      active_slot.graphs.erase(graph_key);
+      // Keep the existing graph alive until the replacement capture is
+      // installed below. Destroying the slot's last graph before capture
+      // drops the torch_npu graph-pool use count to zero, after which the same
+      // pool cannot be reopened for capture.
       auto& static_keys = active_slot.static_mtp_graph_keys;
       static_keys.erase(
           std::remove(static_keys.begin(), static_keys.end(), graph_key),
