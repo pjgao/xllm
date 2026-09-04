@@ -27,12 +27,18 @@ def _make_pool() -> object:
     )
 
 
-def test_overdue_request_remains_more_expensive_than_younger_request() -> None:
+def test_only_extreme_overdue_request_changes_compatible_routing_score() -> None:
     pool = _make_pool()
     pool.started_at[0][0] = 9.6
     pool.started_at[1][1] = 9.9
     scores = pool.scores(now=10.0)
+    assert scores[0] == 0.0
+    assert scores[1] > 0.0
+
+    pool.started_at[0][0] = 8.6
+    scores = pool.scores(now=10.0)
     assert scores[0] > scores[1] > 0.0
+    assert scores[0] == pool.service_time_seconds
 
 
 def test_health_fails_when_any_backend_is_unavailable() -> None:

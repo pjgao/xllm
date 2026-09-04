@@ -55,7 +55,11 @@ class ReplicaPool:
                 (
                     self.service_time_seconds - (now - started)
                     if now - started < self.service_time_seconds
-                    else now - started
+                    else (
+                        self.service_time_seconds
+                        if now - started > 4.0 * self.service_time_seconds
+                        else 0.0
+                    )
                 )
                 for started in active.values()
             ]
