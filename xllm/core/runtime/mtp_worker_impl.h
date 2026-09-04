@@ -313,6 +313,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   uint64_t spec_verify_attention_buffer_capacity_ = 0;
   std::shared_ptr<int> spec_verify_attention_buffer_owner_ =
       std::make_shared<int>(0);
+  std::shared_ptr<AttentionInput::PackedBufferLayout>
+      spec_verify_attention_buffer_layout_;
 
   // Stable validate-sampling controls for the common single-sequence greedy
   // path.  Their values depend on speculative width, not tensor-parallel

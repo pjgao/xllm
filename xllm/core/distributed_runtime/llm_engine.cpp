@@ -1396,6 +1396,12 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     }
   }
 
+  // Graph warmup is a property of the global DP batch. Empty shards have no
+  // local Sequence from which BatchInputBuilder could recover the marker, but
+  // they must make the same capture-vs-eager decision as the active shard or
+  // graph-contained HCCL collectives diverge across ranks.
+  const bool is_graph_warmup = contains_graph_warmup(batched_inputs);
+
   // eplb related
   EplbInfo eplb_info;
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
@@ -1404,7 +1410,7 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     eplb_info = eplb_manager_->get_eplb_info(
         /*allow_eplb_command=*/has_non_empty_batch &&
         all_non_empty_batches_are_decode &&
-        !contains_graph_warmup(batched_inputs));
+        !is_graph_warmup);
     std::vector<torch::Tensor> decode_masks;
     decode_masks.reserve(batched_inputs.size());
     for (const ForwardInput& input : batched_inputs) {
@@ -1440,6 +1446,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
 
   // update dp_global_token_nums and batch_forward_type
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    batched_inputs[dp_rank].input_params.meta.is_graph_warmup =
+        is_graph_warmup;
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =

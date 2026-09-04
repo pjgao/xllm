@@ -32,6 +32,13 @@ enum class GraphWarmupPlan : int8_t {
 
 GraphWarmupPlan graph_warmup_plan(InstanceRole role);
 
+// Returns how many distinct active-rank placements must be issued to warm the
+// sparse-DP graph variants. A collective-symmetric MTP warmup converts the
+// active shard to the same dummy path as its idle peers, so one placement
+// populates the empty graph cache on every local rank.
+int32_t sparse_dp_graph_warmup_rank_count(int32_t dp_size,
+                                          bool collective_symmetric_mtp);
+
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
                                   int32_t token_bucket,

@@ -1320,10 +1320,18 @@ void ProfileManager::warmup_decode_for_graph() {
   const int32_t graph_slot_repetitions =
       ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
                                                                            : 1;
-  const bool warmup_sparse_dp_variants = options_.dp_size() > 1;
+  const SpeculativeConfig& speculative_config =
+      ::xllm::SpeculativeConfig::get_instance();
+  const bool collective_symmetric_mtp_warmup =
+      Platform::is_npu() && speculative_config.num_speculative_tokens() > 0 &&
+      SpeculativeConfig::is_mtp_algorithm(
+          speculative_config.speculative_algorithm());
+  const int32_t sparse_dp_rank_count = sparse_dp_graph_warmup_rank_count(
+      options_.dp_size(), collective_symmetric_mtp_warmup);
+  const bool warmup_sparse_dp_variants = sparse_dp_rank_count > 0;
   const int32_t sparse_capture_count =
       warmup_sparse_dp_variants
-          ? graph_slot_repetitions * decode_bucket_count * options_.dp_size()
+          ? graph_slot_repetitions * decode_bucket_count * sparse_dp_rank_count
           : 0;
   const int32_t total_capture_count =
       graph_slot_repetitions * decode_bucket_count + sparse_capture_count;
@@ -1333,6 +1341,7 @@ void ProfileManager::warmup_decode_for_graph() {
             << ", graph_slot_repetitions=" << graph_slot_repetitions
             << ", configured_max_batch_size=" << max_decode_batch_size
             << ", allocatable_sequences=" << allocatable_sequences
+            << ", sparse_dp_rank_count=" << sparse_dp_rank_count
             << ", decode_seq_len=" << decode_seq_len;
 
   // Capture from the largest bucket down to the smallest so every smaller
@@ -1369,7 +1378,7 @@ void ProfileManager::warmup_decode_for_graph() {
       CHECK_GT(local_batch_size, 0);
       std::vector<int32_t> sparse_total_length_vec(local_batch_size,
                                                    decode_seq_len);
-      for (int32_t active_dp_rank = 0; active_dp_rank < options_.dp_size();
+      for (int32_t active_dp_rank = 0; active_dp_rank < sparse_dp_rank_count;
            ++active_dp_rank) {
         for (int32_t slot_repeat = 0; slot_repeat < graph_slot_repetitions;
              ++slot_repeat) {

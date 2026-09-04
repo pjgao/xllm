@@ -427,6 +427,12 @@ struct AttentionInput {
     torch::Tensor* device_view = nullptr;
   };
 
+  struct PackedBufferLayout {
+    std::vector<uint64_t> offsets;
+    std::vector<uint64_t> slot_bytes;
+    uint64_t total_bytes = 0;
+  };
+
   AttentionHostInput host;
   AttentionDeviceInput device;
   torch::Tensor attention_host_buffer;
@@ -434,6 +440,7 @@ struct AttentionInput {
   uint64_t attention_buffer_bytes = 0;
   uint64_t attention_buffer_capacity = 0;
   std::shared_ptr<int> attention_buffer_owner = std::make_shared<int>(0);
+  std::shared_ptr<PackedBufferLayout> attention_buffer_layout;
 
   AttentionInput to(const torch::Device& target_device) const {
     AttentionInput out;
@@ -444,6 +451,7 @@ struct AttentionInput {
     out.attention_buffer_bytes = attention_buffer_bytes;
     out.attention_buffer_capacity = attention_buffer_capacity;
     out.attention_buffer_owner = attention_buffer_owner;
+    out.attention_buffer_layout = attention_buffer_layout;
     return out;
   }
 
@@ -558,11 +566,37 @@ struct AttentionInput {
 
     constexpr uint64_t kAlignment = 16;
     uint64_t total_bytes = 0;
-    for (auto& entry : entries) {
-      total_bytes = align_up(total_bytes, kAlignment);
-      entry.offset = total_bytes;
-      entry.aligned_bytes = align_up(entry.bytes, kAlignment);
-      total_bytes += entry.aligned_bytes;
+    if (reuse_policy == BufferReusePolicy::FIXED_CAPACITY &&
+        attention_buffer_layout != nullptr) {
+      CHECK_EQ(attention_buffer_layout->offsets.size(), entries.size())
+          << "fixed attention buffer input set changed after graph capture";
+      CHECK_EQ(attention_buffer_layout->slot_bytes.size(), entries.size());
+      for (size_t i = 0; i < entries.size(); ++i) {
+        auto& entry = entries[i];
+        entry.offset = attention_buffer_layout->offsets[i];
+        entry.aligned_bytes = attention_buffer_layout->slot_bytes[i];
+        CHECK_LE(entry.bytes, entry.aligned_bytes)
+            << "fixed attention buffer field " << i
+            << " grew after graph capture";
+      }
+      total_bytes = attention_buffer_layout->total_bytes;
+    } else {
+      for (auto& entry : entries) {
+        total_bytes = align_up(total_bytes, kAlignment);
+        entry.offset = total_bytes;
+        entry.aligned_bytes = align_up(entry.bytes, kAlignment);
+        total_bytes += entry.aligned_bytes;
+      }
+      if (reuse_policy == BufferReusePolicy::GROWABLE) {
+        attention_buffer_layout = std::make_shared<PackedBufferLayout>();
+        attention_buffer_layout->offsets.reserve(entries.size());
+        attention_buffer_layout->slot_bytes.reserve(entries.size());
+        for (const auto& entry : entries) {
+          attention_buffer_layout->offsets.push_back(entry.offset);
+          attention_buffer_layout->slot_bytes.push_back(entry.aligned_bytes);
+        }
+        attention_buffer_layout->total_bytes = total_bytes;
+      }
     }
     if (total_bytes == 0) {
       attention_buffer_bytes = 0;
@@ -654,6 +688,7 @@ struct AttentionInput {
     attention_device_buffer = torch::Tensor();
     attention_buffer_bytes = 0;
     attention_buffer_capacity = 0;
+    attention_buffer_layout.reset();
   }
 
   void ensure_attention_buffer_capacity(uint64_t total_bytes,

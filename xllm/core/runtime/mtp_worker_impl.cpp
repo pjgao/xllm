@@ -75,6 +75,27 @@ bool has_active_dp_tokens(const ForwardInput& input) {
   });
 }
 
+bool is_sparse_dp_graph_warmup(const ForwardInput& input) {
+  const ParallelInput& parallel = input.input_params.parallel;
+  if (!input.input_params.meta.is_graph_warmup ||
+      parallel.dp_global_token_nums.size() <= 1) {
+    return false;
+  }
+  const auto [min_tokens, max_tokens] =
+      std::minmax_element(parallel.dp_global_token_nums.begin(),
+                          parallel.dp_global_token_nums.end());
+  return *min_tokens == 0 && *max_tokens > 0;
+}
+
+void normalize_sparse_dp_graph_warmup_input(ForwardInput& input) {
+  input.input_params.meta.num_sequences = 0;
+  input.input_params.meta.q_max_seq_len = 0;
+  input.input_params.clear_linear_attention_state();
+  input.input_params.attention.host.q_seq_lens.clear();
+  input.input_params.attention.host.q_cu_seq_lens.clear();
+  input.input_params.attention.host.kv_seq_lens.clear();
+}
+
 void broadcast_tokens_in_group(torch::Tensor& tokens,
                                ProcessGroup* process_group,
                                int32_t root_rank = 0) {
@@ -1428,6 +1449,17 @@ void MTPWorkerImpl::prepare_draft_sampling(
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     const ForwardInput& raw_input) {
+  if (is_sparse_dp_graph_warmup(raw_input)) {
+    // The active rank normally captures real draft and expanded target graphs
+    // while idle ranks capture dummy decode graphs. Repeating that mixed
+    // capture with a different active DP rank leaves HCCL graph collectives on
+    // different capture generations. For sparse warmup only, make every rank
+    // execute the same uniform dummy draft and target paths. Normal all-active
+    // warmup has already captured the real spec-verify graphs.
+    ForwardInput empty_input = raw_input;
+    normalize_sparse_dp_graph_warmup_input(empty_input);
+    return step_empty(empty_input);
+  }
   ForwardInput input = raw_input;
   if (use_chunked_prefill_spec_verify_path()) {
     stabilize_decode_host_tensors(input);
@@ -3312,6 +3344,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     attention.attention_buffer_capacity =
         spec_verify_attention_buffer_capacity_;
     attention.attention_buffer_owner = spec_verify_attention_buffer_owner_;
+    attention.attention_buffer_layout = spec_verify_attention_buffer_layout_;
 
     const int64_t expanded_block_rows = static_cast<int64_t>(
         input_params.graph.expanded_kv_seq_lens_vec.size());
@@ -3384,6 +3417,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     spec_verify_attention_device_buffer_ = attention.attention_device_buffer;
     spec_verify_attention_buffer_capacity_ =
         attention.attention_buffer_capacity;
+    spec_verify_attention_buffer_layout_ = attention.attention_buffer_layout;
     input_params.graph.expanded_block_tables = expanded_block_tables_flat.view(
         {expanded_block_rows, verify_block_table_width});
     layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(

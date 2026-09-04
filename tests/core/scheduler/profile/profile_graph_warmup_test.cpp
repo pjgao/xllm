@@ -347,6 +347,21 @@ TEST(GraphWarmupTest, DecodeRoleUsesDecodeOnlyPlan) {
             GraphWarmupPlan::DECODE_ONLY);
 }
 
+TEST(GraphWarmupTest, WarmsEverySparseDpPlacementByDefault) {
+  EXPECT_EQ(sparse_dp_graph_warmup_rank_count(
+                /*dp_size=*/4, /*collective_symmetric_mtp=*/false),
+            4);
+}
+
+TEST(GraphWarmupTest, SymmetricMtpNeedsOneSparseDpPlacement) {
+  EXPECT_EQ(sparse_dp_graph_warmup_rank_count(
+                /*dp_size=*/4, /*collective_symmetric_mtp=*/true),
+            1);
+  EXPECT_EQ(sparse_dp_graph_warmup_rank_count(
+                /*dp_size=*/1, /*collective_symmetric_mtp=*/true),
+            0);
+}
+
 TEST(GraphWarmupTest, FormatsWarmupProgress) {
   const std::string progress = graph_warmup_progress(
       /*completed=*/3, /*total=*/8, /*token_bucket=*/8, /*latency_ms=*/12.5);

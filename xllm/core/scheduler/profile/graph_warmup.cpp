@@ -43,6 +43,16 @@ GraphWarmupPlan graph_warmup_plan(InstanceRole role) {
   return GraphWarmupPlan::UNIFIED;
 }
 
+int32_t sparse_dp_graph_warmup_rank_count(
+    int32_t dp_size,
+    bool collective_symmetric_mtp) {
+  CHECK_GT(dp_size, 0);
+  if (dp_size == 1) {
+    return 0;
+  }
+  return collective_symmetric_mtp ? 1 : dp_size;
+}
+
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
                                   int32_t token_bucket,

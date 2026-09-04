@@ -185,6 +185,27 @@ class GraphPersistentParam final {
     }
     return kv_seq_lens_;
   }
+  torch::Tensor q_cu_seq_lens(uint32_t size = 0) const {
+    if (size > 0) {
+      return q_cu_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/size);
+    }
+    return q_cu_seq_lens_;
+  }
+  torch::Tensor expanded_kv_seq_lens(uint32_t actual_tokens = 0) const {
+    if (actual_tokens > 0) {
+      return expanded_kv_seq_lens_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
+    }
+    return expanded_kv_seq_lens_;
+  }
+  torch::Tensor persistent_expanded_block_tables(
+      uint32_t actual_tokens = 0) const {
+    if (actual_tokens > 0) {
+      return persistent_expanded_block_tables_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
+    }
+    return persistent_expanded_block_tables_;
+  }
   const int32_t* persistent_host_q_seq_lens_data() const {
     return persistent_host_q_seq_lens_.data();
   }
@@ -301,6 +322,7 @@ class GraphPersistentParam final {
   // for deepseekv3.2
   torch::Tensor q_cu_seq_lens_;
   torch::Tensor q_cu_seq_lens_default_;
+  torch::Tensor spec_verify_q_cu_seq_lens_default_;
 
   // for mtp model
   torch::Tensor persistent_embedding_;

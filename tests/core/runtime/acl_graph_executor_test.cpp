@@ -1683,7 +1683,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
   params.attention.host.q_cu_seq_lens = {0, kSpecWidth, kNumTokens};
 
   std::vector<int32_t> token_values = {11, 12, 13, 14, 21, 22, 23, 24};
-  const std::vector<int32_t> position_values = {
+  std::vector<int32_t> position_values = {
       101, 102, 103, 104, 201, 202, 203, 204};
   std::vector<int32_t> linear_state_indices = {3, 4};
   std::vector<int32_t> accepted_tokens = {2, 3};
@@ -1729,6 +1729,115 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
   EXPECT_EQ(stable_token_ptr, token_ids.data_ptr());
   EXPECT_TRUE(torch::equal(token_ids_host, torch::tensor(token_values)));
   EXPECT_TRUE(torch::equal(position_ids_host, torch::tensor(position_values)));
+
+  const auto packed_source_addresses = [&]() {
+    return std::vector<const void*>{
+        token_ids.data_ptr(),
+        positions.data_ptr(),
+        params.embedding.linear_state_indices.data_ptr(),
+        params.num_accepted_tokens.data_ptr(),
+        params.graph.expanded_kv_seq_lens.data_ptr(),
+        expanded_block_tables_flat.data_ptr(),
+        params.attention.device.q_seq_lens.data_ptr(),
+        params.attention.device.kv_seq_lens.data_ptr(),
+        params.attention.device.q_cu_seq_lens.data_ptr(),
+        params.attention.device.new_cache_slots.data_ptr(),
+        params.attention.device.block_tables.data_ptr()};
+  };
+  const std::vector<const void*> full_batch_addresses =
+      packed_source_addresses();
+
+  // A DP rank commonly sees fewer local sequences than the graph bucket used
+  // at capture. The views may shrink, but every graph input must retain its
+  // captured source address.
+  token_values.resize(kSpecWidth);
+  position_values.resize(kSpecWidth);
+  linear_state_indices.resize(1);
+  accepted_tokens.resize(1);
+  expanded_kv_seq_lens.resize(kSpecWidth);
+  expanded_block_tables.resize(kSpecWidth * 2);
+  params.attention.host.q_seq_lens = {kSpecWidth};
+  params.attention.host.kv_seq_lens = {20};
+  params.attention.host.q_cu_seq_lens = {0, kSpecWidth};
+  params.attention.host.new_cache_slots.resize(kSpecWidth);
+  params.attention.host.block_tables =
+      torch::tensor({{51, 52}}, torch::kInt32);
+  ASSERT_TRUE(params.attention.rebuild_device_buffer(
+      device,
+      extra_int_inputs,
+      AttentionInput::BufferReusePolicy::FIXED_CAPACITY));
+  EXPECT_EQ(full_batch_addresses, packed_source_addresses());
+  EXPECT_TRUE(torch::equal(token_ids_host, torch::tensor(token_values)));
+
+  params.meta.num_sequences = 1;
+  params.graph.spec_verify_source_addresses_stable = true;
+  params.graph.input_tokens_override = token_ids;
+  params.graph.use_expanded_decode_for_spec_verify_attention = true;
+  params.graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens;
+  params.graph.expanded_block_tables =
+      expanded_block_tables_flat.view({kSpecWidth, 2});
+  persistent_param.update_spec_verify_inputs(
+      params.graph.input_tokens_override,
+      positions,
+      params,
+      /*padded_num_tokens=*/kNumTokens,
+      npu::SpecVerifyInputUpdateScope::ALL_INPUTS);
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_tokens(kNumTokens).cpu(),
+      torch::tensor({10, 12, 13, 14, 0, 0, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_positions(kNumTokens).cpu(),
+      torch::tensor({101, 102, 103, 104, 0, 0, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_new_cache_slots(kNumTokens).cpu(),
+      torch::tensor({31, 32, 33, 34, 0, 0, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(persistent_param.q_seq_lens(kBatchSize).cpu(),
+                           torch::tensor({4, 4}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(persistent_param.kv_seq_lens(kBatchSize).cpu(),
+                           torch::tensor({20, 1}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(persistent_param.q_cu_seq_lens(3).cpu(),
+                           torch::tensor({0, 4, 8}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_linear_state_indices(kBatchSize).cpu(),
+      torch::tensor({3, 0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_num_accepted_tokens(kBatchSize).cpu(),
+      torch::tensor({2, 1}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.expanded_kv_seq_lens(kNumTokens).cpu(),
+      torch::tensor({17, 18, 19, 20, 1, 1, 1, 1}, torch::kInt32)));
+  EXPECT_EQ(persistent_param.persistent_block_tables(kBatchSize)
+                .select(0, 1)
+                .count_nonzero()
+                .item<int64_t>(),
+            0);
+  EXPECT_EQ(persistent_param.persistent_expanded_block_tables(kNumTokens)
+                .slice(0, kSpecWidth, kNumTokens)
+                .count_nonzero()
+                .item<int64_t>(),
+            0);
+
+  token_values = {10, 12, 13, 14, 21, 22, 23, 24};
+  position_values = {101, 102, 103, 104, 201, 202, 203, 204};
+  linear_state_indices = {3, 4};
+  accepted_tokens = {2, 3};
+  expanded_kv_seq_lens = {17, 18, 19, 20, 27, 28, 29, 30};
+  expanded_block_tables = {
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  params.attention.host.q_seq_lens = {kSpecWidth, kSpecWidth};
+  params.attention.host.kv_seq_lens = {20, 30};
+  params.attention.host.q_cu_seq_lens = {0, kSpecWidth, kNumTokens};
+  params.attention.host.new_cache_slots =
+      {31, 32, 33, 34, 41, 42, 43, 44};
+  params.attention.host.block_tables =
+      torch::tensor({{51, 52}, {61, 62}}, torch::kInt32);
+  params.meta.num_sequences = kBatchSize;
+  params.graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens;
+  ASSERT_TRUE(params.attention.rebuild_device_buffer(
+      device,
+      extra_int_inputs,
+      AttentionInput::BufferReusePolicy::FIXED_CAPACITY));
+  EXPECT_EQ(full_batch_addresses, packed_source_addresses());
 
   params.graph.spec_verify_source_addresses_stable = true;
   params.graph.input_tokens_override = token_ids;
