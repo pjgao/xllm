@@ -3193,19 +3193,19 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   auto& validate_sampling_params = validate_input.sampling_params;
 #if defined(USE_NPU)
   // update_sampling_params() uses repeat_interleave on device tensors.  For a
-  // single greedy sequence that work only expands [0] and [false] into fixed
+  // greedy batch that work only expands identity indices and [false] into
   // validation controls, yet it lands on the final-draft -> target dependency
   // chain.  Reuse stable controls after warmup and retain the generic builder
-  // for sampling, penalties, multi-sequence batches and other backends.
+  // for sampling, penalties and other backends.
   const bool use_stable_greedy_validate_sampling =
       use_explicit_spec_verify_replay_update &&
       validate_sampling_params.all_greedy_sample &&
       validate_sampling_params.selected_token_idxes.defined() &&
-      validate_sampling_params.selected_token_idxes.numel() == 1 &&
+      validate_sampling_params.selected_token_idxes.numel() == num_sequences &&
       validate_sampling_params.sample_idxes.defined() &&
-      validate_sampling_params.sample_idxes.numel() == 1 &&
+      validate_sampling_params.sample_idxes.numel() == num_sequences &&
       validate_sampling_params.do_sample.defined() &&
-      validate_sampling_params.do_sample.numel() == 1 &&
+      validate_sampling_params.do_sample.numel() == num_sequences &&
       !validate_sampling_params.frequency_penalties.defined() &&
       !validate_sampling_params.presence_penalties.defined() &&
       !validate_sampling_params.repetition_penalties.defined() &&
