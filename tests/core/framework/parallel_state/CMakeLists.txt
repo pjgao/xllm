@@ -17,6 +17,8 @@ cc_test(
     collective_communicator_policy_test.cpp
   DEPS
     parallel_state
+    $<$<BOOL:${USE_NPU}>:atb>
+    $<$<BOOL:${USE_NPU}>:c_sec>
     GTest::gtest_main
 )
 
