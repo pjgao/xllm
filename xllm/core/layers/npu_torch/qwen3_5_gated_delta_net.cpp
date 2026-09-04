@@ -27,7 +27,9 @@ Qwen3_5GatedDeltaNetImpl::Qwen3_5GatedDeltaNetImpl(
                                  parallel_args,
                                  options,
                                  /*init_projections=*/false),
-      use_fused_projections_(quant_args.quant_method().empty() &&
+      use_fused_projections_(options.dtype().toScalarType() ==
+                                 torch::kBFloat16 &&
+                             quant_args.quant_method().empty() &&
                              quant_args.quant_descs().empty()) {
   if (use_fused_projections_) {
     fused_qkvzba_proj_ = register_module(
