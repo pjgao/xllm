@@ -23,3 +23,13 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
+
+cc_test(
+  NAME
+    speculative_config_test
+  SRCS
+    speculative_config_test.cpp
+  DEPS
+    :config
+    GTest::gtest_main
+)

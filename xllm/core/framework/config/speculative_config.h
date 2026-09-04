@@ -59,6 +59,17 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "MTP");
   }
 
+  static bool supports_npu_graph_double_buffer(std::string_view model_type,
+                                               std::string_view algorithm,
+                                               bool enable_fia_decode,
+                                               bool enable_no_padding) {
+    const bool is_qwen3_5_target =
+        model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+        model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
+    return is_qwen3_5_target && is_mtp_algorithm(algorithm) &&
+           enable_fia_decode && enable_no_padding;
+  }
+
   // True for the block-diffusion draft algorithms (DFlash, DSpark) that record
   // validate metrics inline per-seq and drive the adaptive per-seq varlen
   // prune. Case-insensitive so it matches however the flag was cased. MTP is
