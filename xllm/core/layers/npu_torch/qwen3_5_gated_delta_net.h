@@ -50,22 +50,11 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
   void verify_projection_weights(const std::string& prefix) const override;
 
  private:
-  StateDict build_fused_qkvzba_state_dict(const StateDict& state_dict) const;
-
   torch::Tensor merge_qkvz_from_split_activations(const torch::Tensor& qkv,
                                                   const torch::Tensor& z) const;
   torch::Tensor merge_ba_from_split_activations(const torch::Tensor& b,
                                                 const torch::Tensor& a) const;
 
-  bool use_fused_projections_ = false;
-  ColumnParallelLinear fused_qkvzba_proj_{nullptr};
-  // Checkpoint files are streamed one at a time and the four source tensors
-  // are not guaranteed to live in the same file. Hold references until the
-  // complete fused projection can be packed and loaded.
-  torch::Tensor pending_qkv_weight_;
-  torch::Tensor pending_z_weight_;
-  torch::Tensor pending_b_weight_;
-  torch::Tensor pending_a_weight_;
   ColumnParallelLinear in_proj_qkv_{nullptr};
   ColumnParallelLinear in_proj_z_{nullptr};
   ColumnParallelLinear in_proj_b_{nullptr};

@@ -702,11 +702,6 @@ std::tuple<int64_t, int64_t> WorkerImpl::estimate_kv_cache_capacity() {
   size_t torch_cache = 0;
   size_t torch_largest_block = 0;
   int32_t device_id = device_.index();
-  // Weight transforms can enqueue large temporary tensors asynchronously.
-  // Synchronize before emptying the allocator cache so KV capacity is based on
-  // resident model weights, rather than stream-pending packing buffers.
-  CHECK_EQ(device_.synchronize_default_stream(), 0)
-      << "Failed to synchronize model weight loading before KV estimation.";
   Device::empty_cache(device_id);
 #if defined(USE_NPU)
   // get torch's cache memory size

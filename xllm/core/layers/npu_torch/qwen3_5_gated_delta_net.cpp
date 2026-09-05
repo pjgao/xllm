@@ -26,25 +26,7 @@ Qwen3_5GatedDeltaNetImpl::Qwen3_5GatedDeltaNetImpl(
                                  quant_args,
                                  parallel_args,
                                  options,
-                                 /*init_projections=*/false),
-      use_fused_projections_(options.dtype().toScalarType() ==
-                                 torch::kBFloat16 &&
-                             quant_args.quant_method().empty() &&
-                             quant_args.quant_descs().empty()) {
-  if (use_fused_projections_) {
-    fused_qkvzba_proj_ = register_module(
-        "fused_in_proj_qkvzba",
-        ColumnParallelLinear(args.hidden_size(),
-                             k_size_ * 2 + v_size_ * 2 + num_v_heads_ * 2,
-                             /*bias=*/false,
-                             /*gather_output=*/false,
-                             quant_args,
-                             parallel_args.tp_group_,
-                             options));
-    LOG(INFO) << "Qwen3.5 BF16 projection fusion enabled: QKV/Z/B/A";
-    return;
-  }
-
+                                 /*init_projections=*/false) {
   in_proj_qkv_ = register_module("in_proj_qkv",
                                  ColumnParallelLinear(args.hidden_size(),
                                                       k_size_ * 2 + v_size_,
@@ -143,16 +125,6 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_ba_from_split_activations(
 std::pair<torch::Tensor, torch::Tensor>
 Qwen3_5GatedDeltaNetImpl::project_decode_inputs(
     const torch::Tensor& hidden_states) {
-  if (use_fused_projections_) {
-    torch::Tensor qkvzba = fused_qkvzba_proj_->forward(hidden_states);
-    const int64_t qkvz_width = (k_size_ * 2 + v_size_ * 2) / tp_size_;
-    const int64_t ba_width = (num_v_heads_ * 2) / tp_size_;
-    torch::Tensor qkvz = qkvzba.narrow(-1, 0, qkvz_width);
-    torch::Tensor ba = qkvzba.narrow(-1, qkvz_width, ba_width);
-    return {qkvz.reshape({qkvz.size(0), -1, qkvz.size(-1)}),
-            ba.reshape({ba.size(0), -1, ba.size(-1)})};
-  }
-
   const auto reshape_projection = [](const torch::Tensor& projection) {
     return projection.view({projection.size(0), -1, projection.size(-1)});
   };
@@ -167,14 +139,6 @@ Qwen3_5GatedDeltaNetImpl::project_decode_inputs(
 std::pair<torch::Tensor, torch::Tensor>
 Qwen3_5GatedDeltaNetImpl::project_flat_inputs(
     const torch::Tensor& hidden_states) {
-  if (use_fused_projections_) {
-    torch::Tensor qkvzba = fused_qkvzba_proj_->forward(hidden_states);
-    const int64_t qkvz_width = (k_size_ * 2 + v_size_ * 2) / tp_size_;
-    const int64_t ba_width = (num_v_heads_ * 2) / tp_size_;
-    return {qkvzba.narrow(-1, 0, qkvz_width),
-            qkvzba.narrow(-1, qkvz_width, ba_width)};
-  }
-
   auto qkv = in_proj_qkv_->forward(hidden_states).unsqueeze(0);
   auto z_proj = in_proj_z_->forward(hidden_states).unsqueeze(0);
   auto b_proj = in_proj_b_->forward(hidden_states).unsqueeze(0);
@@ -190,14 +154,6 @@ std::optional<
 Qwen3_5GatedDeltaNetImpl::project_split_inputs(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata) {
-  if (use_fused_projections_) {
-    // Keep the two packed projection results intact and let the existing
-    // fused_qkvzba_split_reshape_cat kernel split/reshape them in one launch.
-    // Returning views here would require four device copies because slices of
-    // the packed last dimension are not contiguous.
-    return std::nullopt;
-  }
-
   auto qkv = reshape_projected_tokens_with_pad(
       attn_metadata, in_proj_qkv_->forward(hidden_states));
   auto z_proj = reshape_projected_tokens_with_pad(
@@ -218,36 +174,6 @@ Qwen3_5GatedDeltaNetImpl::project_split_inputs(
 
 void Qwen3_5GatedDeltaNetImpl::load_projection_state_dict(
     const StateDict& state_dict) {
-  if (use_fused_projections_) {
-    if (fused_qkvzba_proj_->is_weight_loaded()) {
-      return;
-    }
-    auto remember_if_defined = [&](const char* name, torch::Tensor& pending) {
-      torch::Tensor weight = state_dict.get_tensor(name);
-      if (weight.defined()) {
-        pending = weight;
-      }
-    };
-    remember_if_defined("in_proj_qkv.weight", pending_qkv_weight_);
-    remember_if_defined("in_proj_z.weight", pending_z_weight_);
-    remember_if_defined("in_proj_b.weight", pending_b_weight_);
-    remember_if_defined("in_proj_a.weight", pending_a_weight_);
-    if (pending_qkv_weight_.defined() && pending_z_weight_.defined() &&
-        pending_b_weight_.defined() && pending_a_weight_.defined()) {
-      StateDict source_state_dict({{"in_proj_qkv.weight", pending_qkv_weight_},
-                                   {"in_proj_z.weight", pending_z_weight_},
-                                   {"in_proj_b.weight", pending_b_weight_},
-                                   {"in_proj_a.weight", pending_a_weight_}});
-      fused_qkvzba_proj_->load_state_dict(
-          build_fused_qkvzba_state_dict(source_state_dict));
-      pending_qkv_weight_ = torch::Tensor();
-      pending_z_weight_ = torch::Tensor();
-      pending_b_weight_ = torch::Tensor();
-      pending_a_weight_ = torch::Tensor();
-    }
-    return;
-  }
-
   auto in_proj_qkv_state_dict = state_dict.get_dict_with_prefix("in_proj_qkv.");
   if (in_proj_qkv_state_dict.size() > 0 && !in_proj_qkv_->is_weight_loaded()) {
     in_proj_qkv_->load_state_dict(
@@ -275,13 +201,6 @@ void Qwen3_5GatedDeltaNetImpl::load_projection_state_dict(
 
 void Qwen3_5GatedDeltaNetImpl::verify_projection_weights(
     const std::string& prefix) const {
-  if (use_fused_projections_) {
-    CHECK(fused_qkvzba_proj_ && fused_qkvzba_proj_->is_weight_loaded())
-        << "Missing fused QKV/Z/B/A projection after loading split weights: "
-        << prefix;
-    return;
-  }
-
   CHECK(in_proj_qkv_ && in_proj_qkv_->is_weight_loaded())
       << "Missing required weight after all shards loaded: " << prefix
       << "in_proj_qkv.weight";
@@ -294,61 +213,6 @@ void Qwen3_5GatedDeltaNetImpl::verify_projection_weights(
   CHECK(in_proj_a_ && in_proj_a_->is_weight_loaded())
       << "Missing required weight after all shards loaded: " << prefix
       << "in_proj_a.weight";
-}
-
-StateDict Qwen3_5GatedDeltaNetImpl::build_fused_qkvzba_state_dict(
-    const StateDict& state_dict) const {
-  torch::Tensor qkv_weight = state_dict.get_tensor("in_proj_qkv.weight");
-  torch::Tensor z_weight = state_dict.get_tensor("in_proj_z.weight");
-  torch::Tensor b_weight = state_dict.get_tensor("in_proj_b.weight");
-  torch::Tensor a_weight = state_dict.get_tensor("in_proj_a.weight");
-  if (!qkv_weight.defined() || !z_weight.defined() || !b_weight.defined() ||
-      !a_weight.defined()) {
-    return StateDict({});
-  }
-  CHECK_EQ(qkv_weight.size(1), z_weight.size(1))
-      << "Qwen3.5 QKV/Z projection input width mismatch.";
-  std::vector<torch::Tensor> qkv_parts =
-      torch::split(qkv_weight, {k_size_, k_size_, v_size_}, /*dim=*/0);
-  const int64_t num_v_heads_per_k = num_v_heads_ / num_k_heads_;
-  torch::Tensor qkvz_weight =
-      torch::cat(
-          {qkv_parts[0].view({num_k_heads_, head_k_dim_, -1}),
-           qkv_parts[1].view({num_k_heads_, head_k_dim_, -1}),
-           qkv_parts[2].view(
-               {num_k_heads_, num_v_heads_per_k * head_v_dim_, -1}),
-           z_weight.view({num_k_heads_, num_v_heads_per_k * head_v_dim_, -1})},
-          /*dim=*/1)
-          .reshape({2 * k_size_ + 2 * v_size_, qkv_weight.size(1)})
-          .contiguous();
-  CHECK_EQ(b_weight.sizes(), a_weight.sizes())
-      << "Qwen3.5 B/A projection weight shape mismatch.";
-  CHECK_EQ(b_weight.size(0), num_v_heads_)
-      << "Unexpected Qwen3.5 B projection width.";
-  torch::Tensor ba_weight =
-      torch::cat({b_weight.view({num_k_heads_, num_v_heads_per_k, -1}),
-                  a_weight.view({num_k_heads_, num_v_heads_per_k, -1})},
-                 /*dim=*/1)
-          .reshape({2 * num_v_heads_, b_weight.size(1)})
-          .contiguous();
-
-  // ColumnParallelLinear shards one contiguous output range per TP rank. Pack
-  // each rank's QKVZ and BA rows together so the local activation is laid out
-  // as [local_qkvz, local_ba] and can be consumed as two zero-copy views.
-  std::vector<torch::Tensor> rank_weights;
-  rank_weights.reserve(static_cast<size_t>(tp_size_));
-  const auto qkvz_shards = qkvz_weight.chunk(tp_size_, /*dim=*/0);
-  const auto ba_shards = ba_weight.chunk(tp_size_, /*dim=*/0);
-  CHECK_EQ(qkvz_shards.size(), static_cast<size_t>(tp_size_));
-  CHECK_EQ(ba_shards.size(), static_cast<size_t>(tp_size_));
-  for (int64_t tp_rank = 0; tp_rank < tp_size_; ++tp_rank) {
-    rank_weights.emplace_back(
-        torch::cat({qkvz_shards[static_cast<size_t>(tp_rank)],
-                    ba_shards[static_cast<size_t>(tp_rank)]},
-                   /*dim=*/0));
-  }
-  return StateDict(
-      {{"weight", torch::cat(rank_weights, /*dim=*/0).contiguous()}});
 }
 
 }  // namespace layer
